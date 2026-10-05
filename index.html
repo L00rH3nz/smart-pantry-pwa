@@ -1,0 +1,1042 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Smart Pantry — Dispensa Intelligente</title>
+  <meta name="description" content="Smart Pantry Phase 2: dashboard scadenze, azioni rapide e lista della spesa." />
+
+  <!-- ================= PWA: manifest + meta mobile ================= -->
+  <link rel="manifest" href="manifest.json" />
+  <meta name="theme-color" content="#0f172a" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Smart Pantry" />
+  <link rel="icon" type="image/svg+xml" href="icons/icon.svg" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+
+  <!-- ============================================================
+       DIPENDENZE VIA CDN (versioni pinnate: caching offline affidabile)
+       - Tailwind CSS  : utility-first styling (Play CDN)
+       - Dexie.js      : wrapper IndexedDB (SmartPantryDB)
+       - Lucide Icons  : icone SVG (stessa versione precachata in sw.js)
+       - ZXing         : scanner barcode da fotocamera (stessa versione in sw.js)
+  ============================================================= -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dexie@4.0.8/dist/dexie.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.469.0/dist/umd/lucide.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },
+        },
+      },
+    };
+  </script>
+
+  <style>
+    @keyframes cardIn {
+      from { opacity: 0; transform: translateY(8px) scale(.99); }
+      to   { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    .card-enter { animation: cardIn .25s ease-out; }
+    #toast { transition: transform .3s ease, opacity .3s ease; }
+    /* Modale lista spesa + modale scanner */
+    #shoppingModal { transition: opacity .2s ease; }
+    #shoppingModal.hidden { display: none; }
+    #scanModal.hidden { display: none; }
+  </style>
+</head>
+
+<body class="min-h-screen bg-slate-100 text-slate-800 antialiased">
+
+  <!-- ================= HEADER ================= -->
+  <header class="sticky top-0 z-20 border-b border-slate-200 bg-white/90 backdrop-blur">
+    <div class="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
+      <div class="flex items-center gap-3">
+        <div class="grid h-11 w-11 place-items-center rounded-2xl bg-emerald-600 text-white shadow-sm">
+          <i data-lucide="milk" class="h-6 w-6"></i>
+        </div>
+        <div>
+          <h1 class="text-lg font-extrabold leading-tight tracking-tight">Smart Pantry</h1>
+          <p class="text-xs text-slate-500">Niente sprechi: sai sempre cosa scade.</p>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <!-- Statistiche compatte (Phase 1, mantenute) -->
+        <div class="hidden items-center gap-2 text-xs font-medium md:flex">
+          <span id="statTotal" class="rounded-full bg-slate-900 px-3 py-1.5 text-white">0 prodotti</span>
+          <span id="statExpired" class="rounded-full bg-red-100 px-3 py-1.5 text-red-700">0 scaduti</span>
+          <span id="statSoon" class="rounded-full bg-amber-100 px-3 py-1.5 text-amber-800">0 in scadenza</span>
+        </div>
+        <!-- Apertura Lista della Spesa (Phase 2) -->
+        <button id="openShoppingBtn"
+          class="relative inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-bold text-white shadow-sm transition hover:bg-slate-700 active:scale-[.98]">
+          <i data-lucide="shopping-cart" class="h-4 w-4"></i>
+          <span class="hidden sm:inline">Lista Spesa</span>
+          <span id="shoppingBadge" class="absolute -right-2 -top-2 grid h-6 min-w-6 place-items-center rounded-full bg-emerald-500 px-1.5 text-xs font-extrabold text-white ring-2 ring-white">0</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-6xl px-4 py-6 sm:px-6">
+
+    <!-- ================= DASHBOARD / SUMMARY (Phase 2.1) =================
+         3 contatori dinamici aggiornati a ogni render():
+         Rosso = scaduto/scade oggi · Giallo = entro 3 gg · Totale tracciati -->
+    <section aria-label="Riepilogo dispensa" class="mb-6 grid gap-4 sm:grid-cols-3">
+      <div class="flex items-center gap-4 rounded-2xl border-2 border-red-200 bg-white p-4 shadow-sm">
+        <div class="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-red-100 text-red-600">
+          <i data-lucide="siren" class="h-6 w-6"></i>
+        </div>
+        <div>
+          <p id="dashExpired" class="text-2xl font-extrabold leading-none text-red-600">0</p>
+          <p class="mt-1 text-xs font-semibold uppercase tracking-wider text-slate-500">Scadenza immediata</p>
+          <p class="text-xs text-slate-400">Scaduti o in scadenza oggi</p>
+        </div>
+      </div>
+      <div class="flex items-center gap-4 rounded-2xl border-2 border-amber-200 bg-white p-4 shadow-sm">
+        <div class="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-amber-100 text-amber-600">
+          <i data-lucide="timer" class="h-6 w-6"></i>
+        </div>
+        <div>
+          <p id="dashSoon" class="text-2xl font-extrabold leading-none text-amber-600">0</p>
+          <p class="mt-1 text-xs font-semibold uppercase tracking-wider text-slate-500">In scadenza a breve</p>
+          <p class="text-xs text-slate-400">Entro i prossimi 3 giorni</p>
+        </div>
+      </div>
+      <div class="flex items-center gap-4 rounded-2xl border-2 border-slate-200 bg-white p-4 shadow-sm">
+        <div class="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-slate-900 text-white">
+          <i data-lucide="package" class="h-6 w-6"></i>
+        </div>
+        <div>
+          <p id="dashTotal" class="text-2xl font-extrabold leading-none">0</p>
+          <p class="mt-1 text-xs font-semibold uppercase tracking-wider text-slate-500">Totale tracciati</p>
+          <p class="text-xs text-slate-400">Prodotti in dispensa</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= FILTRI RAPIDI ================= -->
+    <section class="mb-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <!-- Filtro per posizione -->
+        <div>
+          <p class="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">Filtra per posizione</p>
+          <div id="locationFilters" class="flex flex-wrap gap-2" role="tablist" aria-label="Filtra per posizione">
+            <button data-location="all" class="filter-btn rounded-full px-4 py-2 text-sm font-semibold transition">
+              <span class="mr-1.5 inline-flex align-[-2px]"><i data-lucide="layout-grid" class="h-4 w-4"></i></span>Tutti
+            </button>
+            <button data-location="Frigorifero" class="filter-btn rounded-full px-4 py-2 text-sm font-semibold transition">
+              <span class="mr-1.5 inline-flex align-[-2px]"><i data-lucide="refrigerator" class="h-4 w-4"></i></span>Frigo
+            </button>
+            <button data-location="Dispensa" class="filter-btn rounded-full px-4 py-2 text-sm font-semibold transition">
+              <span class="mr-1.5 inline-flex align-[-2px]"><i data-lucide="archive" class="h-4 w-4"></i></span>Dispensa
+            </button>
+            <button data-location="Freezer" class="filter-btn rounded-full px-4 py-2 text-sm font-semibold transition">
+              <span class="mr-1.5 inline-flex align-[-2px]"><i data-lucide="snowflake" class="h-4 w-4"></i></span>Freezer
+            </button>
+          </div>
+        </div>
+
+        <!-- Ricerca realtime (Phase 2.2) + ordinamento -->
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-end">
+          <label class="block">
+            <span class="mb-2 block text-xs font-semibold uppercase tracking-wider text-slate-500">Cerca per nome</span>
+            <span class="relative block">
+              <i data-lucide="search" class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"></i>
+              <input id="searchInput" type="search" placeholder="Filtra in tempo reale…"
+                class="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-10 pr-3 text-sm outline-none transition focus:border-emerald-500 focus:bg-white focus:ring-2 focus:ring-emerald-100 sm:w-52" />
+            </span>
+          </label>
+          <label class="block">
+            <span class="mb-2 block text-xs font-semibold uppercase tracking-wider text-slate-500">Ordina</span>
+            <span class="relative block">
+              <i data-lucide="arrow-down-wide-narrow" class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"></i>
+              <select id="sortSelect"
+                class="w-full appearance-none rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-10 pr-8 text-sm font-medium outline-none transition focus:border-emerald-500 focus:bg-white sm:w-56">
+                <option value="expiry-asc">Scadenza più vicina</option>
+                <option value="expiry-desc">Scadenza più lontana</option>
+                <option value="created-desc">Aggiunti di recente</option>
+                <option value="name-asc">Nome (A–Z)</option>
+              </select>
+            </span>
+          </label>
+        </div>
+      </div>
+
+      <div class="mt-4 flex flex-wrap gap-x-5 gap-y-1 border-t border-dashed border-slate-200 pt-3 text-xs text-slate-600">
+        <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-red-500"></span> Scaduto / scade oggi</span>
+        <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-amber-400"></span> Scade entro 3 giorni</span>
+        <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-emerald-500"></span> Sicuro (&gt; 3 giorni)</span>
+      </div>
+    </section>
+
+    <!-- ================= LAYOUT: FORM + LISTA ================= -->
+    <div class="grid gap-6 lg:grid-cols-[360px_1fr] lg:items-start">
+
+      <!-- ============ FORM AGGIUNTA (invariato Phase 1) ============ -->
+      <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm lg:sticky lg:top-[76px]">
+        <h2 class="flex items-center gap-2 text-base font-bold">
+          <i data-lucide="plus-circle" class="h-5 w-5 text-emerald-600"></i>
+          Aggiungi prodotto
+        </h2>
+        <p class="mb-4 mt-1 text-sm text-slate-500">Salvato in locale (IndexedDB).</p>
+
+        <!-- Inserimento rapido: scanner barcode + Smart Text (Phase 3) -->
+        <div class="mb-4 space-y-3 rounded-xl bg-slate-50 p-3">
+          <button id="openScanBtn" type="button"
+            class="flex w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-slate-700 active:scale-[.99]">
+            <i data-lucide="barcode" class="h-4 w-4"></i>
+            Scansiona codice a barre
+          </button>
+          <div>
+            <label for="smartInput" class="mb-1.5 flex items-center gap-1.5 text-sm font-semibold">
+              <i data-lucide="sparkles" class="h-4 w-4 text-emerald-600"></i>
+              Smart Text Input
+            </label>
+            <div class="flex gap-2">
+              <input id="smartInput" type="text" maxlength="120" placeholder="Es. Latte 2 litri frigo scade 2026-10-15"
+                class="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100" />
+              <button id="smartParseBtn" type="button" title="Interpreta il testo e compila il form"
+                class="grid h-[42px] w-[46px] shrink-0 place-items-center rounded-xl bg-emerald-600 text-white transition hover:bg-emerald-700 active:scale-[.97]">
+                <i data-lucide="wand-2" class="h-4 w-4"></i>
+              </button>
+            </div>
+            <p id="smartHint" class="mt-1.5 hidden text-xs text-slate-500"></p>
+          </div>
+        </div>
+
+        <form id="addForm" class="space-y-4" autocomplete="off">
+          <label class="block">
+            <span class="mb-1.5 block text-sm font-semibold">Nome *</span>
+            <input id="fieldName" type="text" required maxlength="60" placeholder="Es. Mozzarella"
+              class="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm outline-none transition focus:border-emerald-500 focus:bg-white focus:ring-2 focus:ring-emerald-100" />
+          </label>
+          <div class="grid grid-cols-2 gap-3">
+            <label class="block">
+              <span class="mb-1.5 block text-sm font-semibold">Categoria</span>
+              <select id="fieldCategory"
+                class="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm outline-none transition focus:border-emerald-500 focus:bg-white">
+                <option>Latticini</option>
+                <option>Frutta/Verdura</option>
+                <option>Carne/Pesce</option>
+                <option>Secco</option>
+                <option selected>Altro</option>
+              </select>
+            </label>
+            <label class="block">
+              <span class="mb-1.5 block text-sm font-semibold">Posizione</span>
+              <select id="fieldLocation"
+                class="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm outline-none transition focus:border-emerald-500 focus:bg-white">
+                <option>Frigorifero</option>
+                <option>Dispensa</option>
+                <option>Freezer</option>
+              </select>
+            </label>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <label class="block">
+              <span class="mb-1.5 block text-sm font-semibold">Quantità</span>
+              <input id="fieldQuantity" type="number" min="1" max="999" value="1"
+                class="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm outline-none transition focus:border-emerald-500 focus:bg-white focus:ring-2 focus:ring-emerald-100" />
+            </label>
+            <label class="block">
+              <span class="mb-1.5 block text-sm font-semibold">Scadenza *</span>
+              <input id="fieldExpiry" type="date" required
+                class="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm outline-none transition focus:border-emerald-500 focus:bg-white focus:ring-2 focus:ring-emerald-100" />
+            </label>
+          </div>
+          <button type="submit"
+            class="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-700 active:scale-[.99]">
+            <i data-lucide="plus" class="h-4 w-4"></i>
+            Aggiungi alla dispensa
+          </button>
+        </form>
+      </section>
+
+      <!-- ============ LISTA PRODOTTI ============ -->
+      <section>
+        <div class="mb-3 flex items-center justify-between">
+          <h2 class="text-base font-bold">
+            I tuoi prodotti
+            <span id="resultCount" class="ml-1 rounded-full bg-slate-200 px-2.5 py-0.5 text-xs font-bold text-slate-700">0</span>
+          </h2>
+          <button id="clearExpiredBtn" title="Elimina tutti i prodotti scaduti"
+            class="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold text-red-600 transition hover:bg-red-50">
+            <i data-lucide="trash-2" class="h-4 w-4"></i> Svuota scaduti
+          </button>
+        </div>
+
+        <div id="productGrid" class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3"></div>
+
+        <div id="emptyState" class="hidden rounded-2xl border border-dashed border-slate-300 bg-white/60 px-6 py-14 text-center">
+          <div class="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-2xl bg-slate-200/70 text-slate-500">
+            <i data-lucide="shopping-basket" class="h-6 w-6"></i>
+          </div>
+          <p class="font-bold">Nessun prodotto trovato</p>
+          <p class="mx-auto mt-1 max-w-xs text-sm text-slate-500">Aggiungi il tuo primo prodotto dal form oppure cambia filtro di ricerca.</p>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="mx-auto max-w-6xl px-4 pb-10 pt-2 text-center text-xs text-slate-400 sm:px-6">
+    Smart Pantry · Phase 3 · dati salvati nel tuo browser (IndexedDB · Dexie.js)
+  </footer>
+
+  <!-- ================= MODALE LISTA DELLA SPESA (Phase 2.4) ================= -->
+  <div id="shoppingModal" class="hidden fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label="Lista della spesa">
+    <div id="shoppingOverlay" class="absolute inset-0 bg-slate-900/50 backdrop-blur-[2px]"></div>
+    <div class="absolute inset-x-4 top-[8vh] mx-auto w-full max-w-lg overflow-hidden rounded-2xl bg-white shadow-2xl sm:inset-x-0">
+      <div class="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+        <h2 class="flex items-center gap-2 text-base font-extrabold">
+          <span class="grid h-9 w-9 place-items-center rounded-xl bg-slate-900 text-white">
+            <i data-lucide="shopping-cart" class="h-5 w-5"></i>
+          </span>
+          Lista della Spesa
+          <span id="shoppingCount" class="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-bold text-slate-600">0</span>
+        </h2>
+        <button id="closeShoppingBtn" aria-label="Chiudi lista della spesa"
+          class="grid h-9 w-9 place-items-center rounded-lg bg-slate-100 transition hover:bg-slate-200">
+          <i data-lucide="x" class="h-5 w-5"></i>
+        </button>
+      </div>
+      <p class="border-b border-dashed border-slate-200 bg-slate-50 px-5 py-2.5 text-xs text-slate-500">
+        Generata automaticamente dai prodotti segnati come <strong>Consumato</strong>.
+      </p>
+      <!-- Voci lista (render dinamico) -->
+      <ul id="shoppingList" class="max-h-[50vh] divide-y divide-slate-100 overflow-y-auto px-2 py-1"></ul>
+      <div id="shoppingEmpty" class="px-6 py-10 text-center text-sm text-slate-500">
+        <i data-lucide="shopping-basket" class="mx-auto mb-2 h-8 w-8 text-slate-300"></i>
+        <p class="font-semibold text-slate-600">Lista vuota</p>
+        <p>Segna un prodotto come “Consumato” e comparirà qui.</p>
+      </div>
+      <div class="flex items-center justify-between gap-3 border-t border-slate-100 bg-slate-50 px-5 py-4">
+        <button id="clearShoppingBtn"
+          class="inline-flex items-center gap-1.5 rounded-xl bg-red-100 px-4 py-2.5 text-sm font-bold text-red-700 transition hover:bg-red-200 disabled:opacity-40">
+          <i data-lucide="trash-2" class="h-4 w-4"></i> Svuota lista
+        </button>
+        <button id="closeShoppingBtn2" class="rounded-xl bg-slate-900 px-5 py-2.5 text-sm font-bold text-white transition hover:bg-slate-700">
+          Chiudi
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= MODALE SCANNER BARCODE (Phase 3) ================= -->
+  <div id="scanModal" class="hidden fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label="Scanner codice a barre">
+    <div id="scanOverlay" class="absolute inset-0 bg-slate-900/70"></div>
+    <div class="absolute inset-x-4 top-[5vh] mx-auto w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-2xl sm:inset-x-0">
+      <div class="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+        <h2 class="flex items-center gap-2 text-base font-extrabold">
+          <span class="grid h-9 w-9 place-items-center rounded-xl bg-slate-900 text-white">
+            <i data-lucide="barcode" class="h-5 w-5"></i>
+          </span>
+          Scansiona barcode
+        </h2>
+        <button id="closeScanBtn" aria-label="Chiudi scanner"
+          class="grid h-9 w-9 place-items-center rounded-lg bg-slate-100 transition hover:bg-slate-200">
+          <i data-lucide="x" class="h-5 w-5"></i>
+        </button>
+      </div>
+      <div class="bg-slate-900 px-5 py-4">
+        <video id="scanVideo" class="aspect-[4/3] w-full rounded-xl bg-black object-cover" muted playsinline></video>
+        <p id="scanStatus" class="mt-2 text-center text-xs text-slate-300">Avvio fotocamera…</p>
+      </div>
+      <div class="px-5 py-4">
+        <label for="manualBarcode" class="mb-1.5 block text-sm font-semibold">Codice EAN manuale</label>
+        <div class="flex gap-2">
+          <input id="manualBarcode" type="text" inputmode="numeric" maxlength="14" placeholder="Es. 8005121001234"
+            class="min-w-0 flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm outline-none transition focus:border-emerald-500 focus:bg-white" />
+          <button id="manualLookupBtn" class="rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-slate-700">
+            Cerca
+          </button>
+        </div>
+        <p class="mt-2 text-xs text-slate-400">Fotocamera: richiede HTTPS o localhost. Schede prodotto da Open Food Facts (serve connessione).</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast notifiche -->
+  <div id="toast" class="pointer-events-none fixed bottom-6 left-1/2 z-[60] -translate-x-1/2 translate-y-4 opacity-0">
+    <div class="flex items-center gap-2 rounded-full bg-slate-900 px-4 py-2.5 text-sm font-medium text-white shadow-lg">
+      <i data-lucide="check-circle-2" class="h-4 w-4 text-emerald-400"></i>
+      <span id="toastMsg">Fatto</span>
+    </div>
+  </div>
+
+  <script>
+    'use strict';
+
+    /* ================================================================
+     * 1. DATABASE LAYER (Dexie.js → IndexedDB)
+     *    v1 (Phase 1): items
+     *    v2 (Phase 2): + shoppingList (lista temporanea dei consumati)
+     *    NOTA: in v2 bisogna ri-dichiarare anche `items`, altrimenti
+     *    Dexie la considererebbe eliminata durante l'upgrade.
+     * ============================================================= */
+    const db = new Dexie('SmartPantryDB');
+    db.version(1).stores({
+      items: '++id, name, category, location, quantity, expirationDate, createdAt',
+    });
+    db.version(2).stores({
+      items: '++id, name, category, location, quantity, expirationDate, createdAt',
+      shoppingList: '++id, name, category, quantity, addedAt',
+    });
+
+    const ItemRepository = {
+      add: (item) => db.items.add(item),
+      getAll: () => db.items.toArray(),
+      getById: (id) => db.items.get(id),
+      remove: (id) => db.items.delete(id),
+      updateQuantity: (id, quantity) => db.items.update(id, { quantity }),
+      update: (id, patch) => db.items.update(id, patch),
+      clearExpired: async () => {
+        const today = toISODate(new Date());
+        return db.items.where('expirationDate').below(today).delete();
+      },
+    };
+
+    const ShoppingRepository = {
+      getAll: () => db.shoppingList.orderBy('addedAt').reverse().toArray(),
+      count: () => db.shoppingList.count(),
+      remove: (id) => db.shoppingList.delete(id),
+      clear: () => db.shoppingList.clear(),
+      /** Aggiunge una voce; se il nome esiste già, cumula la quantità. */
+      upsert: async ({ name, category, quantity }) => {
+        const key = name.trim().toLowerCase();
+        const existing = await db.shoppingList.toArray().then((rows) => rows.find((r) => r.name.toLowerCase() === key));
+        if (existing) {
+          return db.shoppingList.update(existing.id, { quantity: existing.quantity + quantity });
+        }
+        return db.shoppingList.add({ name: name.trim(), category, quantity, addedAt: new Date().toISOString() });
+      },
+    };
+
+    /* ================================================================
+     * 2. STATO UI + COSTANTI
+     * ============================================================= */
+    const state = {
+      locationFilter: 'all',
+      search: '',
+      sort: 'expiry-asc',
+    };
+
+    const CATEGORY_ICON = {
+      'Latticini': 'milk',
+      'Frutta/Verdura': 'apple',
+      'Carne/Pesce': 'fish',
+      'Secco': 'wheat',
+      'Altro': 'package',
+    };
+    const LOCATION_ICON = {
+      'Frigorifero': 'refrigerator',
+      'Dispensa': 'archive',
+      'Freezer': 'snowflake',
+    };
+
+    /* ================================================================
+     * 3. HELPERS — date, scadenza, formato
+     * ============================================================= */
+    const toISODate = (d) =>
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+    const parseISODate = (iso) => {
+      const [y, m, d] = iso.split('-').map(Number);
+      return new Date(y, m - 1, d);
+    };
+
+    /** Aggiunge N giorni a una data 'YYYY-MM-DD' e restituisce 'YYYY-MM-DD'. */
+    const addDaysISO = (iso, days) => {
+      const d = parseISODate(iso);
+      d.setDate(d.getDate() + days);
+      return toISODate(d);
+    };
+
+    function daysUntil(expirationISO) {
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      return Math.round((parseISODate(expirationISO) - today) / 86_400_000);
+    }
+
+    /**
+     * 🔴 expired → scaduto (diff < 0) o scade oggi (diff === 0)
+     * 🟡 soon    → 1..3 giorni · 🟢 fresh → > 3 giorni
+     */
+    function getExpiryStatus(expirationISO) {
+      const diff = daysUntil(expirationISO);
+      if (diff <= 0) return { key: 'expired', label: diff < 0 ? `Scaduto da ${Math.abs(diff)} g` : 'Scade oggi', diff };
+      if (diff <= 3) return { key: 'soon', label: diff === 1 ? 'Scade domani' : `Scade tra ${diff} giorni`, diff };
+      return { key: 'fresh', label: `Scade tra ${diff} giorni`, diff };
+    }
+
+    const STATUS_STYLE = {
+      expired: { ring: 'border-red-300', badge: 'bg-red-100 text-red-700', dot: 'bg-red-500' },
+      soon:    { ring: 'border-amber-300', badge: 'bg-amber-100 text-amber-800', dot: 'bg-amber-400' },
+      fresh:   { ring: 'border-emerald-200', badge: 'bg-emerald-100 text-emerald-700', dot: 'bg-emerald-500' },
+    };
+
+    const formatDateIT = (iso) =>
+      parseISODate(iso).toLocaleDateString('it-IT', { day: 'numeric', month: 'short', year: 'numeric' });
+
+    const escapeHtml = (s) =>
+      String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+    /* ================================================================
+     * 4. RENDER — dashboard, card, lista spesa
+     * ============================================================= */
+    const els = {
+      grid: document.getElementById('productGrid'),
+      empty: document.getElementById('emptyState'),
+      count: document.getElementById('resultCount'),
+      statTotal: document.getElementById('statTotal'),
+      statExpired: document.getElementById('statExpired'),
+      statSoon: document.getElementById('statSoon'),
+      dashExpired: document.getElementById('dashExpired'),
+      dashSoon: document.getElementById('dashSoon'),
+      dashTotal: document.getElementById('dashTotal'),
+      filters: [...document.querySelectorAll('#locationFilters .filter-btn')],
+      shoppingBadge: document.getElementById('shoppingBadge'),
+      shoppingCount: document.getElementById('shoppingCount'),
+      shoppingList: document.getElementById('shoppingList'),
+      shoppingEmpty: document.getElementById('shoppingEmpty'),
+      clearShoppingBtn: document.getElementById('clearShoppingBtn'),
+    };
+
+    /** Card prodotto con azioni rapide Phase 2: Consumato + Sposta in Freezer. */
+    function cardTemplate(item) {
+      const status = getExpiryStatus(item.expirationDate);
+      const style = STATUS_STYLE[status.key];
+      const catIcon = CATEGORY_ICON[item.category] ?? 'package';
+      const locIcon = LOCATION_ICON[item.location] ?? 'archive';
+      const alreadyFrozen = item.location === 'Freezer';
+
+      return `
+      <article class="card-enter flex flex-col rounded-2xl border-2 ${style.ring} bg-white p-4 shadow-sm transition hover:shadow-md">
+        <div class="mb-3 flex items-start justify-between gap-2">
+          <span class="inline-flex items-center gap-1.5 rounded-full ${style.badge} px-2.5 py-1 text-xs font-bold">
+            <span class="h-2 w-2 rounded-full ${style.dot}"></span>${status.label}
+          </span>
+          <span class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">
+            <i data-lucide="${catIcon}" class="h-3.5 w-3.5"></i>${escapeHtml(item.category)}
+          </span>
+        </div>
+
+        <h3 class="truncate text-base font-extrabold" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</h3>
+
+        <dl class="mt-2 space-y-1.5 text-sm text-slate-600">
+          <div class="flex items-center gap-2">
+            <i data-lucide="${locIcon}" class="h-4 w-4 text-slate-400"></i>
+            <span>${escapeHtml(item.location)}</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <i data-lucide="calendar-days" class="h-4 w-4 text-slate-400"></i>
+            <span>Scade il <strong class="text-slate-800">${formatDateIT(item.expirationDate)}</strong></span>
+          </div>
+        </dl>
+
+        <!-- Riga quantità + elimina secca -->
+        <div class="mt-4 flex items-center justify-between border-t border-slate-100 pt-3">
+          <div class="flex items-center gap-2">
+            <button data-action="dec" data-id="${item.id}" aria-label="Riduci quantità"
+              class="grid h-8 w-8 place-items-center rounded-lg bg-slate-100 transition hover:bg-slate-200 disabled:opacity-40"
+              ${item.quantity <= 1 ? 'disabled' : ''}>
+              <i data-lucide="minus" class="h-4 w-4"></i>
+            </button>
+            <span class="min-w-14 text-center text-sm font-bold">× ${item.quantity}</span>
+            <button data-action="inc" data-id="${item.id}" aria-label="Aumenta quantità"
+              class="grid h-8 w-8 place-items-center rounded-lg bg-slate-100 transition hover:bg-slate-200">
+              <i data-lucide="plus" class="h-4 w-4"></i>
+            </button>
+          </div>
+          <button data-action="delete" data-id="${item.id}" title="Elimina senza aggiungere alla lista spesa"
+            class="grid h-8 w-8 place-items-center rounded-lg bg-red-100 text-red-600 transition hover:bg-red-200">
+            <i data-lucide="trash-2" class="h-4 w-4"></i>
+          </button>
+        </div>
+
+        <!-- Azioni rapide Phase 2 -->
+        <div class="mt-2 grid grid-cols-2 gap-2">
+          <button data-action="consume" data-id="${item.id}" title="Rimuovi e aggiungi alla Lista della Spesa"
+            class="inline-flex items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-2 py-2.5 text-xs font-bold text-white transition hover:bg-emerald-700 active:scale-[.98]">
+            <i data-lucide="check" class="h-4 w-4"></i>Consumato
+          </button>
+          <button data-action="freeze" data-id="${item.id}"
+            title="${alreadyFrozen ? 'Già in Freezer: estende comunque di +30 giorni' : 'Sposta in Freezer e posticipa la scadenza di +30 giorni'}"
+            class="inline-flex items-center justify-center gap-1.5 rounded-xl bg-sky-100 px-2 py-2.5 text-xs font-bold text-sky-800 transition hover:bg-sky-200 active:scale-[.98]">
+            <i data-lucide="snowflake" class="h-4 w-4"></i>${alreadyFrozen ? '+30 giorni' : 'In Freezer'}
+          </button>
+        </div>
+      </article>`;
+    }
+
+    /** Riga della Lista della Spesa con cancellazione singola. */
+    function shoppingRowTemplate(row) {
+      return `
+      <li class="flex items-center justify-between gap-3 rounded-xl px-3 py-2.5 transition hover:bg-slate-50">
+        <div class="flex min-w-0 items-center gap-3">
+          <span class="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500">
+            <i data-lucide="${CATEGORY_ICON[row.category] ?? 'package'}" class="h-4 w-4"></i>
+          </span>
+          <div class="min-w-0">
+            <p class="truncate text-sm font-bold">${escapeHtml(row.name)} <span class="font-semibold text-slate-400">× ${row.quantity}</span></p>
+            <p class="text-xs text-slate-400">${escapeHtml(row.category)}</p>
+          </div>
+        </div>
+        <button data-shop-delete="${row.id}" title="Rimuovi dalla lista"
+          class="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-red-100 text-red-600 transition hover:bg-red-200">
+          <i data-lucide="x" class="h-4 w-4"></i>
+        </button>
+      </li>`;
+    }
+
+    /** Dashboard + header stats dai dati grezzi (non filtrati). */
+    function updateSummary(all) {
+      const nExpired = all.filter((i) => getExpiryStatus(i.expirationDate).key === 'expired').length;
+      const nSoon = all.filter((i) => getExpiryStatus(i.expirationDate).key === 'soon').length;
+      els.dashExpired.textContent = nExpired;
+      els.dashSoon.textContent = nSoon;
+      els.dashTotal.textContent = all.length;
+      els.statTotal.textContent = `${all.length} prodotti`;
+      els.statExpired.textContent = `${nExpired} scaduti`;
+      els.statSoon.textContent = `${nSoon} in scadenza`;
+    }
+
+    /** Disegna la Lista della Spesa + badge contatore. */
+    async function renderShopping() {
+      const rows = await ShoppingRepository.getAll();
+      els.shoppingBadge.textContent = rows.length;
+      els.shoppingCount.textContent = rows.length;
+      els.shoppingEmpty.style.display = rows.length ? 'none' : 'block';
+      els.shoppingList.innerHTML = rows.map(shoppingRowTemplate).join('');
+      els.clearShoppingBtn.disabled = rows.length === 0;
+      lucide.createIcons();
+    }
+
+    /** Applica filtri + ordinamento e disegna griglia + summary + spesa. */
+    async function render() {
+      const all = await ItemRepository.getAll();
+      updateSummary(all);
+
+      const q = state.search.trim().toLowerCase();
+      const visible = all.filter((i) =>
+        (state.locationFilter === 'all' || i.location === state.locationFilter) &&
+        (!q || i.name.toLowerCase().includes(q)) // ricerca testuale realtime sul nome
+      );
+
+      const by = {
+        'expiry-asc': (a, b) => a.expirationDate.localeCompare(b.expirationDate),
+        'expiry-desc': (a, b) => b.expirationDate.localeCompare(a.expirationDate),
+        'created-desc': (a, b) => b.createdAt.localeCompare(a.createdAt),
+        'name-asc': (a, b) => a.name.localeCompare(b.name, 'it'),
+      }[state.sort];
+      visible.sort(by);
+
+      els.count.textContent = visible.length;
+      els.empty.classList.toggle('hidden', visible.length > 0);
+      els.grid.innerHTML = visible.map(cardTemplate).join('');
+
+      paintFilterButtons();
+      await renderShopping();
+      lucide.createIcons();
+    }
+
+    function paintFilterButtons() {
+      els.filters.forEach((btn) => {
+        const active = btn.dataset.location === state.locationFilter;
+        btn.className = `filter-btn rounded-full px-4 py-2 text-sm font-semibold transition ${
+          active ? 'bg-slate-900 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+        }`;
+      });
+    }
+
+    /* ================================================================
+     * 5. AZIONI RAPIDE (Phase 2.3)
+     * ============================================================= */
+
+    /** "Consumato": toglie dalla dispensa e accoda alla Lista della Spesa. */
+    async function consumeItem(id) {
+      const item = await ItemRepository.getById(id);
+      if (!item) return;
+      await db.transaction('rw', db.items, db.shoppingList, async () => {
+        await ItemRepository.remove(id);
+        await ShoppingRepository.upsert({ name: item.name, category: item.category, quantity: item.quantity });
+      });
+      showToast(`“${item.name}” aggiunto alla Lista Spesa`);
+    }
+
+    /** "Sposta in Freezer": location=Freezer e scadenza +30 giorni in un click. */
+    async function freezeItem(id) {
+      const item = await ItemRepository.getById(id);
+      if (!item) return;
+      const newExpiry = addDaysISO(item.expirationDate, 30);
+      await ItemRepository.update(id, { location: 'Freezer', expirationDate: newExpiry });
+      showToast(`“${item.name}” in Freezer fino al ${formatDateIT(newExpiry)}`);
+    }
+
+    /* ================================================================
+     * 6. EVENTI — form, filtri, card, modale
+     * ============================================================= */
+    document.getElementById('addForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const name = document.getElementById('fieldName').value.trim();
+      const expirationDate = document.getElementById('fieldExpiry').value;
+      if (!name || !expirationDate) return;
+
+      await ItemRepository.add({
+        name,
+        category: document.getElementById('fieldCategory').value,
+        location: document.getElementById('fieldLocation').value,
+        quantity: Math.max(1, parseInt(document.getElementById('fieldQuantity').value, 10) || 1),
+        expirationDate,
+        createdAt: new Date().toISOString(),
+      });
+
+      e.target.reset();
+      document.getElementById('fieldQuantity').value = 1;
+      document.getElementById('fieldCategory').value = 'Altro';
+      showToast('Prodotto aggiunto alla dispensa');
+      render();
+    });
+
+    document.getElementById('locationFilters').addEventListener('click', (e) => {
+      const btn = e.target.closest('.filter-btn');
+      if (!btn) return;
+      state.locationFilter = btn.dataset.location;
+      render();
+    });
+
+    // Ricerca testuale in tempo reale (debounce 150 ms per non re-renderizzare a ogni tasto)
+    let searchTimer;
+    document.getElementById('searchInput').addEventListener('input', (e) => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => { state.search = e.target.value; render(); }, 150);
+    });
+    document.getElementById('sortSelect').addEventListener('change', (e) => {
+      state.sort = e.target.value;
+      render();
+    });
+
+    // Delegation azioni card
+    els.grid.addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-action]');
+      if (!btn) return;
+      const id = Number(btn.dataset.id);
+
+      if (btn.dataset.action === 'consume') await consumeItem(id);
+      else if (btn.dataset.action === 'freeze') await freezeItem(id);
+      else if (btn.dataset.action === 'delete') {
+        await ItemRepository.remove(id);
+        showToast('Prodotto eliminato');
+      } else {
+        const item = await ItemRepository.getById(id);
+        if (!item) return;
+        const next = item.quantity + (btn.dataset.action === 'inc' ? 1 : -1);
+        if (next < 1) return;
+        await ItemRepository.updateQuantity(id, next);
+      }
+      render();
+    });
+
+    document.getElementById('clearExpiredBtn').addEventListener('click', async () => {
+      const deleted = await ItemRepository.clearExpired();
+      showToast(deleted ? `${deleted} scaduti eliminati` : 'Nessun prodotto scaduto');
+      render();
+    });
+
+    // --- Modale Lista della Spesa ---
+    const modal = document.getElementById('shoppingModal');
+    const openModal = () => { modal.classList.remove('hidden'); lucide.createIcons(); };
+    const closeModal = () => modal.classList.add('hidden');
+    document.getElementById('openShoppingBtn').addEventListener('click', openModal);
+    document.getElementById('closeShoppingBtn').addEventListener('click', closeModal);
+    document.getElementById('closeShoppingBtn2').addEventListener('click', closeModal);
+    document.getElementById('shoppingOverlay').addEventListener('click', closeModal);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeModal(); closeScanner(); } });
+
+    // Cancellazione singola voce (delegation dentro la modale)
+    els.shoppingList.addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-shop-delete]');
+      if (!btn) return;
+      await ShoppingRepository.remove(Number(btn.dataset.shopDelete));
+      showToast('Voce rimossa dalla lista');
+      render();
+    });
+
+    // Svuota intera lista
+    els.clearShoppingBtn.addEventListener('click', async () => {
+      await ShoppingRepository.clear();
+      showToast('Lista della spesa svuotata');
+      render();
+    });
+
+    /* ================================================================
+     * 8. INSERIMENTO RAPIDO (Phase 3)
+     *    8a. fillForm — autocompila i campi del form di aggiunta
+     *    8b. Scanner barcode (ZXing) + lookup Open Food Facts
+     *    8c. Smart Text Input (regex su testo libero italiano)
+     * ============================================================= */
+
+    /** Scrive nel form solo i campi valorizzati (gli altri restano invariati). */
+    function fillForm({ name, category, location, quantity, expirationDate }) {
+      if (name) document.getElementById('fieldName').value = name;
+      if (category) document.getElementById('fieldCategory').value = category;
+      if (location) document.getElementById('fieldLocation').value = location;
+      if (quantity) document.getElementById('fieldQuantity').value = quantity;
+      if (expirationDate) document.getElementById('fieldExpiry').value = expirationDate;
+    }
+
+    /* ---------------- 8b. Barcode → Open Food Facts ------------------ */
+
+    const scanEls = {
+      modal: document.getElementById('scanModal'),
+      status: document.getElementById('scanStatus'),
+      manual: document.getElementById('manualBarcode'),
+    };
+
+    let codeReader = null;
+    let lastScan = { code: '', at: 0 };
+
+    const setScanStatus = (msg) => { scanEls.status.textContent = msg; };
+
+    async function openScanner() {
+      scanEls.modal.classList.remove('hidden');
+      lucide.createIcons();
+      // ZXing arriva via CDN: senza rete niente scanner live (resta l'EAN manuale).
+      if (typeof ZXing === 'undefined') {
+        setScanStatus('Libreria scanner non caricata (serve connessione) — usa il codice manuale.');
+        return;
+      }
+      try {
+        codeReader ??= new ZXing.BrowserMultiFormatReader();
+        setScanStatus('Avvio fotocamera…');
+        await codeReader.decodeFromConstraints(
+          { video: { facingMode: { ideal: 'environment' } }, audio: false },
+          'scanVideo',
+          (result) => {
+            if (result) onBarcodeDetected(result.getText());
+            // Gli errori frame-per-frame (NotFoundException) sono normali: si ignorano.
+          },
+        );
+        setScanStatus('Inquadra il codice a barre con la fotocamera');
+      } catch (err) {
+        console.warn('[Scanner] fotocamera non disponibile:', err);
+        setScanStatus('Fotocamera non disponibile (permesso negato o pagina non sicura) — usa il codice manuale.');
+      }
+    }
+
+    function closeScanner() {
+      try { codeReader?.reset(); } catch { /* già fermo */ }
+      scanEls.modal.classList.add('hidden');
+    }
+
+    /** Debounce anti-doppia-lettura: stesso codice ignorato per 2,5 s. */
+    async function onBarcodeDetected(code) {
+      const now = Date.now();
+      if (code === lastScan.code && now - lastScan.at < 2500) return;
+      lastScan = { code, at: now };
+      closeScanner();
+      await lookupBarcode(code);
+      document.getElementById('fieldExpiry').focus();
+    }
+
+    /** Mappa le categorie OFF (tag EN / parole IT) alle nostre 5 categorie. */
+    function mapOFFCategory(product) {
+      const hay = [
+        product.categories,
+        Array.isArray(product.categories_tags) ? product.categories_tags.join(' ') : '',
+      ].filter(Boolean).join(' ').toLowerCase();
+      // "dair" (non "dairy") copre anche il tag "dairies"; FR perché OFF è francese di origine
+      if (/(milk|cheese|yogurt|yogourt|dair|butter|cream|egg|latte|latticini|formagg|burro|uova|lait|fromage|yaourt|beurre|oeuf)/.test(hay)) return 'Latticini';
+      if (/(fruit|vegetable|legume|frutta|verdura|insalata|pomodor|légum)/.test(hay)) return 'Frutta/Verdura';
+      if (/(meat|fish|seafood|poultry|pork|beef|chicken|tuna|salmon|carne|pesce|pollo|tonno|salmone|prosciutto|viande|poisson|poulet|boeuf|porc|thon|saumon|jambon)/.test(hay)) return 'Carne/Pesce';
+      if (/(pasta|cereal|flour|rice|biscuit|bread|canned|grocer|pulses|riso|farina|biscott|pane|legumi|pâte|pates?|riz|farine|pains?|conserve|épicer|legumineuse)/.test(hay)) return 'Secco';
+      return 'Altro';
+    }
+
+    /** Quantità OFF ("6 x 125 g" → 6, "2 L" → 2, altrimenti invariata). */
+    function parseOFFQuantity(qty) {
+      if (!qty) return null;
+      const m = String(qty).match(/(\d+)\s*x/i) || String(qty).match(/^(\d+)/);
+      const n = m ? parseInt(m[1], 10) : NaN;
+      return Number.isFinite(n) && n >= 1 && n <= 999 ? n : null;
+    }
+
+    /** Fetch scheda OFF e autocompila Nome + Categoria (+quantità se presente). */
+    async function lookupBarcode(code) {
+      const barcode = String(code).replace(/\D/g, '');
+      if (barcode.length < 8) { showToast('Codice non valido (min. 8 cifre)'); return; }
+      showToast(`Cerco ${barcode} su Open Food Facts…`);
+      try {
+        const res = await fetch(`https://world.openfoodfacts.org/api/v0/product/${encodeURIComponent(barcode)}.json`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.status !== 1 || !data.product) {
+          showToast('Prodotto non trovato: compila il nome a mano');
+          fillForm({ name: barcode });
+          return;
+        }
+        const p = data.product;
+        const name = (p.product_name_it || p.product_name || '').trim().slice(0, 60);
+        fillForm({ name: name || barcode, category: mapOFFCategory(p), quantity: parseOFFQuantity(p.quantity) });
+        showToast(name ? `Trovato: ${name} — aggiungi scadenza e salva` : 'Trovato: aggiungi nome e scadenza');
+      } catch (err) {
+        console.warn('[OFF] lookup fallito:', err);
+        showToast('Ricerca non disponibile offline: serve connessione');
+      }
+    }
+
+    document.getElementById('openScanBtn').addEventListener('click', openScanner);
+    document.getElementById('closeScanBtn').addEventListener('click', closeScanner);
+    document.getElementById('scanOverlay').addEventListener('click', closeScanner);
+    document.getElementById('manualLookupBtn').addEventListener('click', () => {
+      const code = scanEls.manual.value.trim();
+      if (!code) return;
+      closeScanner();
+      lookupBarcode(code);
+    });
+    scanEls.manual.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); document.getElementById('manualLookupBtn').click(); }
+    });
+
+    /* ---------------- 8c. Smart Text Input (regex) ------------------- */
+
+    /** Parole-chiave categoria (ordine = priorità di match). */
+    const SMART_CATEGORIES = [
+      ['Latticini', ['latte', 'formaggio', 'mozzarella', 'yogurt', 'burro', 'parmigiano', 'ricotta', 'panna', 'uovo', 'uova']],
+      ['Frutta/Verdura', ['mela', 'mele', 'frutta', 'verdura', 'insalata', 'pomodoro', 'banana', 'arancia', 'carota', 'zucchina', 'patata', 'cipolla', 'pera', 'pere', 'uva']],
+      ['Carne/Pesce', ['carne', 'pesce', 'pollo', 'manzo', 'maiale', 'tonno', 'salmone', 'prosciutto', 'salame', 'merluzzo', 'tacchino']],
+      ['Secco', ['pasta', 'riso', 'farina', 'biscotti', 'cereali', 'pane', 'cracker', 'lenticchie', 'fagioli', 'ceci', 'olio', 'zucchero', 'sale', 'caffè', 'tè', 'thè']],
+    ];
+
+    const SMART_LOCATIONS = [
+      ['Freezer', ['freezer', 'congelatore', 'surgelatore', 'frozen']],
+      ['Frigorifero', ['frigo', 'frigorifero', 'fridge']],
+      ['Dispensa', ['dispensa', 'credenza']],
+    ];
+
+    const SMART_UNITS = ['litri', 'litro', 'grammi', 'grammo', 'chili', 'pezzi', 'pezzo', 'pacchi', 'pacco', 'bottiglie', 'bottiglia', 'vasetti', 'vasetto', 'scatole', 'scatola', 'confezioni', 'confezione'];
+    const SMART_FILLERS = ['scade', 'scadenza', 'il', 'lo', 'la', 'i', 'gli', 'le', 'di', 'da', 'in', 'del', 'della', 'al', 'alla', 'un', 'uno', 'una'];
+
+    const ISO_DATE_RE = /\d{4}[\/\-.]\d{1,2}[\/\-.]\d{1,2}/;
+    const IT_DATE_RE = /\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}/;
+    const QTY_RE = /(?:x\s?(\d{1,3}))|(?:(\d{1,3})\s?(?:x\b|pz\b|pezz[oi]\b|pacch[oi]\b|confezioni?\b|bottigli[ae]\b|vasett[oi]\b|scatol[ae]\b|litr[oi]\b|grammi\b|chil[oi]\b|k?g\b))/i;
+
+    const wordHit = (lower, words) => words.find((w) => new RegExp(`\\b${w}\\b`).test(lower));
+
+    /**
+     * Estrae { name, quantity, location, category, expirationDate } da testo libero.
+     * Es. "Latte 2 litri frigo scade 2026-10-15" → Latte ×2 · Frigorifero · 2026-10-15.
+     * La keyword di categoria resta nel nome ("Latte") perché spesso coincide col prodotto.
+     */
+    function parseSmartText(raw) {
+      const out = { name: '', quantity: null, location: null, category: null, expirationDate: '' };
+      const lower = ` ${raw.toLowerCase()} `;
+
+      // 1) Scadenza: formato ISO > formato IT > parole relative
+      let m = lower.match(ISO_DATE_RE);
+      if (m) {
+        const [y, mo, d] = m[0].split(/[\/\-.]/);
+        out.expirationDate = `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`;
+      } else if ((m = lower.match(IT_DATE_RE))) {
+        const [d, mo, y] = m[0].split(/[\/\-.]/);
+        out.expirationDate = `${y.length === 2 ? '20' + y : y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`;
+      } else if (/\bdopodomani\b/.test(lower)) {
+        out.expirationDate = addDaysISO(toISODate(new Date()), 2);
+      } else if (/\bdomani\b/.test(lower)) {
+        out.expirationDate = addDaysISO(toISODate(new Date()), 1);
+      } else if (/\boggi\b/.test(lower)) {
+        out.expirationDate = toISODate(new Date());
+      }
+
+      // 2) Posizione
+      for (const [loc, words] of SMART_LOCATIONS) {
+        if (wordHit(lower, words)) { out.location = loc; break; }
+      }
+
+      // 3) Quantità (cerca fuori dalla data per non catturare giorno/mese/anno)
+      const noDate = lower.replace(ISO_DATE_RE, ' ').replace(IT_DATE_RE, ' ');
+      const qm = noDate.match(QTY_RE);
+      if (qm) {
+        const n = parseInt(qm[1] ?? qm[2], 10);
+        if (n >= 1 && n <= 999) out.quantity = n;
+      }
+
+      // 4) Categoria da parole-chiave
+      for (const [cat, words] of SMART_CATEGORIES) {
+        if (wordHit(lower, words)) { out.category = cat; break; }
+      }
+
+      // 5) Nome = residuo dopo rimozione dei token riconosciuti
+      let rest = ` ${raw} `.replace(ISO_DATE_RE, ' ').replace(IT_DATE_RE, ' ').replace(QTY_RE, ' ');
+      const dropWords = [...SMART_FILLERS, ...SMART_UNITS,
+        ...SMART_LOCATIONS.flatMap(([, w]) => w),
+        'oggi', 'domani', 'dopodomani'];
+      for (const w of dropWords) rest = rest.replace(new RegExp(`\\b${w}\\b`, 'gi'), ' ');
+      rest = rest.replace(/\s+/g, ' ').trim();
+      if (!rest) rest = raw.replace(ISO_DATE_RE, '').replace(IT_DATE_RE, '').replace(/\s+/g, ' ').trim();
+      out.name = (rest.charAt(0).toUpperCase() + rest.slice(1)).slice(0, 60);
+
+      return out;
+    }
+
+    function applySmartText() {
+      const input = document.getElementById('smartInput');
+      const hint = document.getElementById('smartHint');
+      if (!input.value.trim()) {
+        showToast('Scrivi prima una descrizione (es. Latte 2 litri frigo…)');
+        return;
+      }
+      const p = parseSmartText(input.value);
+      fillForm(p);
+      const bits = [
+        p.name || null,
+        p.quantity ? `×${p.quantity}` : null,
+        p.category, p.location,
+        p.expirationDate ? formatDateIT(p.expirationDate) : null,
+      ].filter(Boolean);
+      hint.textContent = `Riconosciuto: ${bits.join(' · ')} — controlla e premi “Aggiungi”.`;
+      hint.classList.remove('hidden');
+      showToast('Campi compilati dallo Smart Text');
+      document.getElementById('fieldName').focus();
+    }
+
+    document.getElementById('smartParseBtn').addEventListener('click', applySmartText);
+    document.getElementById('smartInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); applySmartText(); }
+    });
+
+    /* ================================================================
+     * 7. TOAST + INIT
+     * ============================================================= */
+    let toastTimer;
+    function showToast(msg) {
+      const toast = document.getElementById('toast');
+      document.getElementById('toastMsg').textContent = msg;
+      toast.classList.remove('opacity-0', 'translate-y-4');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.add('opacity-0', 'translate-y-4'), 2200);
+    }
+
+    render().catch((err) => console.error('Errore init SmartPantryDB:', err));
+  </script>
+
+  <!-- Registrazione Service Worker (PWA offline). Richiede http(s), non funziona su file:// -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker
+          .register('./sw.js', { scope: './' })
+          .then((reg) => console.log('[PWA] Service Worker registrato:', reg.scope))
+          .catch((err) => console.warn('[PWA] Registrazione SW fallita:', err));
+      });
+    }
+  </script>
+</body>
+</html>
