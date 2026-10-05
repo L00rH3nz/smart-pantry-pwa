@@ -327,7 +327,7 @@
   <!-- ================= MODALE SCANNER BARCODE (Phase 3) ================= -->
   <div id="scanModal" class="hidden fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label="Scanner codice a barre">
     <div id="scanOverlay" class="absolute inset-0 bg-slate-900/70"></div>
-    <div class="absolute inset-x-4 top-[5vh] mx-auto w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-2xl sm:inset-x-0">
+    <div class="absolute inset-x-4 top-[5vh] mx-auto flex max-h-[88dvh] w-full max-w-md flex-col overflow-y-auto overscroll-contain rounded-2xl bg-white shadow-2xl sm:inset-x-0">
       <div class="flex items-center justify-between border-b border-slate-100 px-5 py-4">
         <h2 class="flex items-center gap-2 text-base font-extrabold">
           <span class="grid h-9 w-9 place-items-center rounded-xl bg-slate-900 text-white">
@@ -368,21 +368,26 @@
         <p class="text-sm text-slate-600">Inquadra la scadenza di <strong id="ocrProductName">questo prodotto</strong>: foto nitida e ravvicinata.</p>
         <div class="mt-3 flex gap-2">
           <button id="ocrCaptureBtn" class="flex flex-1 items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-slate-700 active:scale-[.98]">
-            <i data-lucide="camera" class="h-4 w-4"></i> Scatta foto
+            <i data-lucide="camera" class="h-4 w-4"></i> Scatta e leggi
           </button>
           <label for="ocrFileInput" class="flex flex-1 cursor-pointer items-center justify-center gap-2 rounded-xl bg-slate-100 px-4 py-2.5 text-sm font-bold text-slate-600 transition hover:bg-slate-200">
             <i data-lucide="image-plus" class="h-4 w-4"></i> Carica foto
           </label>
           <input id="ocrFileInput" type="file" accept="image/*" capture="environment" class="hidden" />
         </div>
-        <canvas id="ocrCanvas" class="mt-3 hidden w-full rounded-xl border border-slate-200"></canvas>
+        <canvas id="ocrCanvas" class="mt-3 hidden max-h-52 w-full rounded-xl border border-slate-200 object-cover"></canvas>
         <div id="ocrProgressWrap" class="mt-3 hidden">
           <div class="h-2 overflow-hidden rounded-full bg-slate-100">
             <div id="ocrProgressBar" class="h-full w-0 rounded-full bg-emerald-500 transition-all"></div>
           </div>
           <p id="ocrProgressLabel" class="mt-1.5 text-center text-xs text-slate-500">Lettura in corso…</p>
         </div>
-        <div id="ocrCandidates" class="mt-3 space-y-2"></div>
+        <p id="ocrFeedback" class="mt-3 hidden text-xs font-semibold text-slate-600"></p>
+        <div id="ocrCandidates" class="mt-2 space-y-2"></div>
+        <details id="ocrRawWrap" class="mt-2 hidden text-xs text-slate-500">
+          <summary class="cursor-pointer font-semibold text-slate-500">Mostra testo rilevato</summary>
+          <p id="ocrRawText" class="mt-1 whitespace-pre-wrap break-words rounded-lg bg-slate-50 p-2 font-mono text-[11px] text-slate-600"></p>
+        </details>
         <p id="ocrNoDate" class="mt-3 hidden rounded-xl bg-amber-50 px-4 py-3 text-xs leading-relaxed text-amber-800">Nessuna data trovata: riprova con più luce, testo a fuoco e foto ravvicinata.</p>
         <div class="mt-3 flex gap-2">
           <button id="ocrBackBtn" class="flex-1 rounded-xl bg-slate-100 px-4 py-2.5 text-sm font-bold text-slate-600 transition hover:bg-slate-200">← Barcode</button>
@@ -1222,30 +1227,52 @@
 
     const daysInMonth = (y, m) => new Date(y, m, 0).getDate();
 
-    const validYMD = (y, m, d) =>
-      y >= 2000 && y <= 2100 && m >= 1 && m <= 12 && d >= 1 && d <= daysInMonth(y, m);
-
     const pad2 = (n) => String(n).padStart(2, '0');
 
     /** Il gruppo deve contenere almeno una cifra vera (non solo lettere confuse dall'OCR). */
     const hasDigit = (s) => /[0-9]/.test(s);
-    const allDigits = (...parts) => parts.every(hasDigit);
+
+    /** Anno da gruppo OCR: 2 cifre → 20xx; fuori 2000–2100 → null. */
+    const yearOf = (raw) => {
+      if (!hasDigit(raw)) return null;
+      const d = fixOcrDigits(raw);
+      if (!d) return null;
+      const y = d.length <= 2 ? 2000 + parseInt(d, 10) : parseInt(d, 10);
+      return (y >= 2000 && y <= 2100) ? y : null;
+    };
+
+    /** Mese 1–12 da gruppo OCR, altrimenti null. */
+    const monthOf = (raw) => {
+      if (!hasDigit(raw)) return null;
+      const m = parseInt(fixOcrDigits(raw), 10);
+      return (m >= 1 && m <= 12) ? m : null;
+    };
+
+    /** Giorno valido per (anno, mese) da gruppo OCR, altrimenti null. */
+    const dayOf = (raw, y, m) => {
+      if (!hasDigit(raw)) return null;
+      const d = parseInt(fixOcrDigits(raw), 10);
+      return (d >= 1 && d <= daysInMonth(y, m)) ? d : null;
+    };
 
     /**
-     * Cerca i match di una regex, valida i gruppi e consuma (oscura) solo le
-     * porzioni valide. I match non validi fanno avanzare la scansione di un
-     * solo carattere, così una "falsa data" non divora una data vera adiacente
-     * (es. la "O" di "ENTRO 01/01/2027").
+     * Cerca i match di una regex e li converte in date ISO tramite `parse`
+     * (restituisce la stringa ISO o null). Consuma solo le porzioni valide;
+     * i match non validi fanno avanzare la scansione di un solo carattere,
+     * così non distruggono il testo per i pattern successivi
+     * (es. "40-08/2028" non deve cancellare "08/2028";
+     * la "O" di "ENTRO 01/01/2027" non deve mangiarla).
      */
-    function consumeMatches(re, text, validate) {
-      const matches = [];
+    function consumeMatches(re, text, parse) {
+      const found = [];
       const spans = [];
       re.lastIndex = 0;
       let m;
       while ((m = re.exec(text)) !== null) {
         if (m[0].length === 0) { re.lastIndex++; continue; }
-        if (validate(m.slice(1))) {
-          matches.push(m.slice(1));
+        const iso = parse(m.slice(1));
+        if (iso) {
+          found.push(iso);
           spans.push([m.index, m.index + m[0].length]);
         } else {
           re.lastIndex = m.index + 1; // riprova dal carattere successivo
@@ -1255,7 +1282,7 @@
       for (const [a, b] of spans.sort((x, y) => y[0] - x[0])) {
         rest = rest.slice(0, a) + ' '.repeat(b - a) + rest.slice(b);
       }
-      return { matches, rest };
+      return { found, rest };
     }
 
     /**
@@ -1265,55 +1292,65 @@
      */
     function extractDatesFromOCR(rawText) {
       const found = new Set();
-      const push = (y, m, d) => {
-        if (validYMD(y, m, d)) found.add(`${y}-${pad2(m)}-${pad2(d)}`);
-      };
+      const iso = (y, m, d) => `${y}-${pad2(m)}-${pad2(d)}`;
       let work = ` ${String(rawText).toUpperCase()} `;
 
       // 1) ISO AAAA-MM-GG (prima, per non frammentarlo come GG-MM-AA)
-      let r = consumeMatches(new RegExp(`(${OCR_NUM}{4})${OCR_SEP}(${OCR_NUM}{1,2})${OCR_SEP}(${OCR_NUM}{1,2})`, 'g'), work, (g) => allDigits(g[0], g[1], g[2]));
+      let r = consumeMatches(
+        new RegExp(`(${OCR_NUM}{4})${OCR_SEP}(${OCR_NUM}{1,2})${OCR_SEP}(${OCR_NUM}{1,2})`, 'g'), work,
+        ([yRaw, mRaw, dRaw]) => {
+          const y = yearOf(yRaw); if (y === null) return null;
+          const m = monthOf(mRaw); if (m === null) return null;
+          const d = dayOf(dRaw, y, m); if (d === null) return null;
+          return iso(y, m, d);
+        });
       work = r.rest;
-      for (const [yRaw, mRaw, dRaw] of r.matches) {
-        push(parseInt(fixOcrDigits(yRaw), 10), parseInt(fixOcrDigits(mRaw), 10), parseInt(fixOcrDigits(dRaw), 10));
-      }
+      r.found.forEach((d) => found.add(d));
 
       // 2) Formato italiano GG-MM-AAAA (anno a 2 cifre → 20xx)
-      r = consumeMatches(new RegExp(`(${OCR_NUM}{1,2})${OCR_SEP}(${OCR_NUM}{1,2})${OCR_SEP}(${OCR_NUM}{2,4})`, 'g'), work, (g) => allDigits(g[0], g[1], g[2]));
+      r = consumeMatches(
+        new RegExp(`(${OCR_NUM}{1,2})${OCR_SEP}(${OCR_NUM}{1,2})${OCR_SEP}(${OCR_NUM}{2,4})`, 'g'), work,
+        ([dRaw, mRaw, yRaw]) => {
+          const y = yearOf(yRaw); if (y === null) return null;
+          const m = monthOf(mRaw); if (m === null) return null;
+          const d = dayOf(dRaw, y, m); if (d === null) return null;
+          return iso(y, m, d);
+        });
       work = r.rest;
-      for (const [dRaw, mRaw, yRaw] of r.matches) {
-        const yFixed = fixOcrDigits(yRaw);
-        const y = yFixed.length <= 2 ? 2000 + parseInt(yFixed, 10) : parseInt(yFixed, 10);
-        push(y, parseInt(fixOcrDigits(mRaw), 10), parseInt(fixOcrDigits(dRaw), 10));
-      }
+      r.found.forEach((d) => found.add(d));
 
       // 3) Mese/anno MM/AAAA (o MM/AA → 20AA) → ultimo giorno del mese
-      r = consumeMatches(new RegExp(`\\b(${OCR_NUM}{1,2})${OCR_SEP}(${OCR_NUM}{2,4})\\b`, 'g'), work, (g) => allDigits(g[0], g[1]));
+      r = consumeMatches(
+        new RegExp(`\\b(${OCR_NUM}{1,2})${OCR_SEP}(${OCR_NUM}{2,4})\\b`, 'g'), work,
+        ([mRaw, yRaw]) => {
+          const y = yearOf(yRaw); if (y === null) return null;
+          const m = monthOf(mRaw); if (m === null) return null;
+          return iso(y, m, daysInMonth(y, m));
+        });
       work = r.rest;
-      for (const [mRaw, yRaw] of r.matches) {
-        const yFixed = fixOcrDigits(yRaw);
-        const y = yFixed.length <= 2 ? 2000 + parseInt(yFixed, 10) : parseInt(yFixed, 10);
-        const m = parseInt(fixOcrDigits(mRaw), 10);
-        if (y >= 2000 && y <= 2100 && m >= 1 && m <= 12) push(y, m, daysInMonth(y, m));
-      }
+      r.found.forEach((d) => found.add(d));
 
       // 4) Mesi testuali: "15 OTT 2026" e "ottobre 2026" (= fine mese)
       const monthNames = Object.keys(OCR_MONTHS).sort((a, b) => b.length - a.length).join('|');
       const fixMonth = (t) => t.replace(/^0/, 'O').toLowerCase(); // "0TT" → "OTT"
-      r = consumeMatches(new RegExp(`\\b(${OCR_NUM}{1,2})\\s+(${monthNames})\\s+(${OCR_NUM}{2,4})\\b`, 'gi'), work, (g) => hasDigit(g[0]) && hasDigit(g[2]));
+      r = consumeMatches(
+        new RegExp(`\\b(${OCR_NUM}{1,2})\\s+(${monthNames})\\s+(${OCR_NUM}{2,4})\\b`, 'gi'), work,
+        ([dRaw, monRaw, yRaw]) => {
+          const mo = OCR_MONTHS[fixMonth(monRaw)]; if (!mo) return null;
+          const y = yearOf(yRaw); if (y === null) return null;
+          const d = dayOf(dRaw, y, mo); if (d === null) return null;
+          return iso(y, mo, d);
+        });
       work = r.rest;
-      for (const [dRaw, monRaw, yRaw] of r.matches) {
-        const mo = OCR_MONTHS[fixMonth(monRaw)];
-        if (!mo) continue;
-        const yFixed = fixOcrDigits(yRaw);
-        const y = yFixed.length <= 2 ? 2000 + parseInt(yFixed, 10) : parseInt(yFixed, 10);
-        push(y, mo, parseInt(fixOcrDigits(dRaw), 10));
-      }
-      r = consumeMatches(new RegExp(`\\b(${monthNames})\\s+(${OCR_NUM}{4})\\b`, 'gi'), work, (g) => hasDigit(g[1]));
-      for (const [monRaw, yRaw] of r.matches) {
-        const mo = OCR_MONTHS[fixMonth(monRaw)];
-        const y = parseInt(fixOcrDigits(yRaw), 10);
-        if (mo && y >= 2000 && y <= 2100) push(y, mo, daysInMonth(y, mo));
-      }
+      r.found.forEach((d) => found.add(d));
+      r = consumeMatches(
+        new RegExp(`\\b(${monthNames})\\s+(${OCR_NUM}{4})\\b`, 'gi'), work,
+        ([monRaw, yRaw]) => {
+          const mo = OCR_MONTHS[fixMonth(monRaw)]; if (!mo) return null;
+          const y = yearOf(yRaw); if (y === null) return null;
+          return iso(y, mo, daysInMonth(y, mo));
+        });
+      r.found.forEach((d) => found.add(d));
 
       return [...found].sort().slice(0, 4);
     }
@@ -1354,6 +1391,10 @@
       document.getElementById('ocrProgressBar').style.width = '0%';
       document.getElementById('ocrCandidates').innerHTML = '';
       document.getElementById('ocrNoDate').classList.add('hidden');
+      document.getElementById('ocrFeedback').classList.add('hidden');
+      document.getElementById('ocrFeedback').textContent = '';
+      document.getElementById('ocrRawWrap').classList.add('hidden');
+      document.getElementById('ocrRawText').textContent = '';
       const f = document.getElementById('ocrFileInput');
       if (f) f.value = '';
       ocrBusy = false;
@@ -1388,6 +1429,7 @@
       document.getElementById('ocrCandidates').innerHTML = '';
       document.getElementById('ocrNoDate').classList.add('hidden');
       wrap.classList.remove('hidden');
+      wrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       try {
         const { data: { text } } = await Tesseract.recognize(source, 'ita', {
           logger: (info) => {
@@ -1400,7 +1442,16 @@
           },
         });
         const dates = extractDatesFromOCR(text);
+        // Feedback sempre visibile: testo grezzo + esito, con auto-scroll
+        const cleanText = (text || '').trim();
+        document.getElementById('ocrRawText').textContent = cleanText ? cleanText.slice(0, 600) : '(nessun testo rilevato)';
+        document.getElementById('ocrRawWrap').classList.remove('hidden');
+        const feedback = document.getElementById('ocrFeedback');
+        feedback.classList.remove('hidden');
         if (dates.length) {
+          feedback.textContent = dates.length === 1
+            ? 'Data trovata — toccala per confermarla'
+            : `${dates.length} date trovate — tocca quella corretta`;
           document.getElementById('ocrCandidates').innerHTML =
             '<p class="text-xs font-semibold uppercase tracking-wider text-slate-500">Tocca la data corretta</p>' +
             dates.map((iso) => `
@@ -1410,11 +1461,17 @@
                 <span class="text-xs font-semibold text-emerald-500">USA →</span>
               </button>`).join('');
           lucide.createIcons();
+          document.getElementById('ocrCandidates').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         } else {
+          feedback.textContent = 'Nessuna data riconosciuta nel testo.';
           document.getElementById('ocrNoDate').classList.remove('hidden');
+          document.getElementById('ocrNoDate').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         }
       } catch (err) {
         console.warn('[OCR] riconoscimento fallito:', err);
+        const feedback = document.getElementById('ocrFeedback');
+        feedback.textContent = 'Lettura non riuscita: riprova o inserisci la data a mano.';
+        feedback.classList.remove('hidden');
         showToast('Lettura non riuscita: riprova o inserisci a mano');
       } finally {
         ocrBusy = false;
