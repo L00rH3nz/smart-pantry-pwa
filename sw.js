@@ -3,9 +3,11 @@
  *
  * Strategia:
  *  - App shell (HTML, manifest, icone): precache in install (cache-first).
- *  - Script CDN (Tailwind / Dexie / Lucide / ZXing): precache best-effort
- *    in install + stale-while-revalidate a runtime, così l'app resta usabile
- *    offline dopo la prima visita online.
+ *  - Script CDN (Tailwind / Dexie / Lucide / ZXing / Tesseract): precache
+ *    best-effort in install + stale-while-revalidate a runtime, così l'app
+ *    resta usabile offline dopo la prima visita online.
+ *    (Il worker/wasm Tesseract e i dati lingua "ita" si caricano al primo OCR
+ *    e vengono cachati dal runtime SW per gli usi successivi.)
  *  - Navigazioni: network-first con fallback alla index.html cachata.
  *  - API Open Food Facts: sempre network-only (dati freschi, serve rete).
  *
@@ -14,7 +16,7 @@
  * ========================================================================== */
 'use strict';
 
-const CACHE_VERSION = 'smart-pantry-v2';
+const CACHE_VERSION = 'smart-pantry-v3';
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 
@@ -35,10 +37,11 @@ const CDN_CORE = [
   'https://cdn.jsdelivr.net/npm/dexie@4.0.8/dist/dexie.min.js',
   'https://cdn.jsdelivr.net/npm/lucide@0.469.0/dist/umd/lucide.min.js',
   'https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js',
+  'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js',
 ];
 
 /** Origini servite con strategia stale-while-revalidate. */
-const RUNTIME_ORIGINS = ['cdn.tailwindcss.com', 'cdn.jsdelivr.net', 'unpkg.com'];
+const RUNTIME_ORIGINS = ['cdn.tailwindcss.com', 'cdn.jsdelivr.net', 'unpkg.com', 'tessdata.projectnaptha.com'];
 
 /* ---------------- Install: precache app shell + CDN (best-effort) -------- */
 self.addEventListener('install', (event) => {

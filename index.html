@@ -22,11 +22,13 @@
        - Dexie.js      : wrapper IndexedDB (SmartPantryDB)
        - Lucide Icons  : icone SVG (stessa versione precachata in sw.js)
        - ZXing         : scanner barcode da fotocamera (stessa versione in sw.js)
+       - Tesseract.js  : OCR on-device per la scadenza, step 2 wizard (stessa versione in sw.js)
   ============================================================= -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/dexie@4.0.8/dist/dexie.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/lucide@0.469.0/dist/umd/lucide.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 
   <script>
     tailwind.config = {
@@ -331,18 +333,25 @@
           <span class="grid h-9 w-9 place-items-center rounded-xl bg-slate-900 text-white">
             <i data-lucide="barcode" class="h-5 w-5"></i>
           </span>
-          Scansiona barcode
+          <span id="scanTitle">Passo 1 di 2 · Barcode</span>
         </h2>
         <button id="closeScanBtn" aria-label="Chiudi scanner"
           class="grid h-9 w-9 place-items-center rounded-lg bg-slate-100 transition hover:bg-slate-200">
           <i data-lucide="x" class="h-5 w-5"></i>
         </button>
       </div>
+      <!-- Step indicator del wizard -->
+      <div class="flex items-center gap-2 border-b border-slate-100 bg-slate-50 px-5 py-2.5 text-xs font-bold">
+        <span id="pillStep1" class="rounded-full px-3 py-1 bg-slate-900 text-white">1 · Barcode</span>
+        <span class="text-slate-300">→</span>
+        <span id="pillStep2" class="rounded-full px-3 py-1 bg-slate-200 text-slate-500">2 · Scadenza</span>
+      </div>
       <div class="bg-slate-900 px-5 py-4">
         <video id="scanVideo" class="aspect-[4/3] w-full rounded-xl bg-black object-cover" muted playsinline></video>
         <p id="scanStatus" class="mt-2 text-center text-xs text-slate-300">Avvio fotocamera…</p>
       </div>
-      <div class="px-5 py-4">
+      <!-- Step 1: barcode (live + EAN manuale) -->
+      <div id="wizardStep1" class="px-5 py-4">
         <label for="manualBarcode" class="mb-1.5 block text-sm font-semibold">Codice EAN manuale</label>
         <div class="flex gap-2">
           <input id="manualBarcode" type="text" inputmode="numeric" maxlength="14" placeholder="Es. 8005121001234"
@@ -351,7 +360,34 @@
             Cerca
           </button>
         </div>
-        <p class="mt-2 text-xs text-slate-400">Fotocamera: richiede HTTPS o localhost. Schede prodotto da Open Food Facts (serve connessione).</p>
+        <p class="mt-2 text-xs text-slate-400">Fotocamera: richiede HTTPS o localhost. Dopo il barcode passerai allo step 2 per fotografare la scadenza.</p>
+      </div>
+
+      <!-- Step 2: fotografa la scadenza (OCR on-device) -->
+      <div id="wizardStep2" class="hidden px-5 py-4">
+        <p class="text-sm text-slate-600">Inquadra la scadenza di <strong id="ocrProductName">questo prodotto</strong>: foto nitida e ravvicinata.</p>
+        <div class="mt-3 flex gap-2">
+          <button id="ocrCaptureBtn" class="flex flex-1 items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-slate-700 active:scale-[.98]">
+            <i data-lucide="camera" class="h-4 w-4"></i> Scatta foto
+          </button>
+          <label for="ocrFileInput" class="flex flex-1 cursor-pointer items-center justify-center gap-2 rounded-xl bg-slate-100 px-4 py-2.5 text-sm font-bold text-slate-600 transition hover:bg-slate-200">
+            <i data-lucide="image-plus" class="h-4 w-4"></i> Carica foto
+          </label>
+          <input id="ocrFileInput" type="file" accept="image/*" capture="environment" class="hidden" />
+        </div>
+        <canvas id="ocrCanvas" class="mt-3 hidden w-full rounded-xl border border-slate-200"></canvas>
+        <div id="ocrProgressWrap" class="mt-3 hidden">
+          <div class="h-2 overflow-hidden rounded-full bg-slate-100">
+            <div id="ocrProgressBar" class="h-full w-0 rounded-full bg-emerald-500 transition-all"></div>
+          </div>
+          <p id="ocrProgressLabel" class="mt-1.5 text-center text-xs text-slate-500">Lettura in corso…</p>
+        </div>
+        <div id="ocrCandidates" class="mt-3 space-y-2"></div>
+        <p id="ocrNoDate" class="mt-3 hidden rounded-xl bg-amber-50 px-4 py-3 text-xs leading-relaxed text-amber-800">Nessuna data trovata: riprova con più luce, testo a fuoco e foto ravvicinata.</p>
+        <div class="mt-3 flex gap-2">
+          <button id="ocrBackBtn" class="flex-1 rounded-xl bg-slate-100 px-4 py-2.5 text-sm font-bold text-slate-600 transition hover:bg-slate-200">← Barcode</button>
+          <button id="ocrSkipBtn" class="flex-1 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-emerald-700">Salta →</button>
+        </div>
       </div>
     </div>
   </div>
@@ -984,6 +1020,8 @@
     function closeScanner() {
       try { codeReader?.reset(); } catch { /* già fermo */ }
       scanEls.modal.classList.add('hidden');
+      setWizardStep(1);
+      resetOcrUI();
     }
 
     /** Debounce anti-doppia-lettura: stesso codice ignorato per 2,5 s. */
@@ -991,9 +1029,8 @@
       const now = Date.now();
       if (code === lastScan.code && now - lastScan.at < 2500) return;
       lastScan = { code, at: now };
-      closeScanner();
-      await lookupBarcode(code);
-      document.getElementById('fieldExpiry').focus();
+      const name = await lookupBarcode(code);
+      goWizardStep2(name || code);
     }
 
     /** Mappa le categorie OFF (tag EN / parole IT) alle nostre 5 categorie. */
@@ -1018,10 +1055,10 @@
       return Number.isFinite(n) && n >= 1 && n <= 999 ? n : null;
     }
 
-    /** Fetch scheda OFF e autocompila Nome + Categoria (+quantità se presente). */
+    /** Fetch scheda OFF, autocompila Nome + Categoria e restituisce il nome (per lo step 2). */
     async function lookupBarcode(code) {
       const barcode = String(code).replace(/\D/g, '');
-      if (barcode.length < 8) { showToast('Codice non valido (min. 8 cifre)'); return; }
+      if (barcode.length < 8) { showToast('Codice non valido (min. 8 cifre)'); return null; }
       showToast(`Cerco ${barcode} su Open Food Facts…`);
       try {
         const res = await fetch(`https://world.openfoodfacts.org/api/v0/product/${encodeURIComponent(barcode)}.json`);
@@ -1030,26 +1067,28 @@
         if (data.status !== 1 || !data.product) {
           showToast('Prodotto non trovato: compila il nome a mano');
           fillForm({ name: barcode });
-          return;
+          return barcode;
         }
         const p = data.product;
         const name = (p.product_name_it || p.product_name || '').trim().slice(0, 60);
         fillForm({ name: name || barcode, category: mapOFFCategory(p), quantity: parseOFFQuantity(p.quantity) });
-        showToast(name ? `Trovato: ${name} — aggiungi scadenza e salva` : 'Trovato: aggiungi nome e scadenza');
+        showToast(name ? `Trovato: ${name} — ora fotografa la scadenza` : 'Trovato: ora fotografa la scadenza');
+        return name || barcode;
       } catch (err) {
         console.warn('[OFF] lookup fallito:', err);
         showToast('Ricerca non disponibile offline: serve connessione');
+        return null;
       }
     }
 
     document.getElementById('openScanBtn').addEventListener('click', openScanner);
     document.getElementById('closeScanBtn').addEventListener('click', closeScanner);
     document.getElementById('scanOverlay').addEventListener('click', closeScanner);
-    document.getElementById('manualLookupBtn').addEventListener('click', () => {
+    document.getElementById('manualLookupBtn').addEventListener('click', async () => {
       const code = scanEls.manual.value.trim();
       if (!code) return;
-      closeScanner();
-      lookupBarcode(code);
+      const name = await lookupBarcode(code);
+      goWizardStep2(name || code);
     });
     scanEls.manual.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); document.getElementById('manualLookupBtn').click(); }
@@ -1161,6 +1200,262 @@
     document.getElementById('smartInput').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); applySmartText(); }
     });
+
+    /* ================================================================
+     * 10. WIZARD STEP 2 — scadenza via OCR on-device (Tesseract.js)
+     * ============================================================= */
+
+    /** Mesi italiani (forme brevi ed estese) per le date testuali. */
+    const OCR_MONTHS = {
+      gen: 1, genn: 1, gennaio: 1, feb: 2, febb: 2, febbraio: 2,
+      mar: 3, marzo: 3, apr: 4, aprile: 4, mag: 5, maggio: 5,
+      giu: 6, giugno: 6, lug: 7, luglio: 7, ago: 8, agosto: 8,
+      set: 9, sett: 9, settembre: 9, ott: 10, ottobre: 10,
+      nov: 11, novembre: 11, dic: 12, dicembre: 12,
+    };
+
+    const OCR_NUM = '[0-9OIlL|]';
+    const OCR_SEP = '[\\s\\/\\-.]{1,3}';
+
+    /** Ripara le confusioni OCR tipiche (O→0, I/L→1) dentro un candidato data. */
+    const fixOcrDigits = (s) => s.replace(/[OQ]/g, '0').replace(/[IlL|]/g, '1').replace(/[^0-9]/g, '');
+
+    const daysInMonth = (y, m) => new Date(y, m, 0).getDate();
+
+    const validYMD = (y, m, d) =>
+      y >= 2000 && y <= 2100 && m >= 1 && m <= 12 && d >= 1 && d <= daysInMonth(y, m);
+
+    const pad2 = (n) => String(n).padStart(2, '0');
+
+    /** Il gruppo deve contenere almeno una cifra vera (non solo lettere confuse dall'OCR). */
+    const hasDigit = (s) => /[0-9]/.test(s);
+    const allDigits = (...parts) => parts.every(hasDigit);
+
+    /**
+     * Cerca i match di una regex, valida i gruppi e consuma (oscura) solo le
+     * porzioni valide. I match non validi fanno avanzare la scansione di un
+     * solo carattere, così una "falsa data" non divora una data vera adiacente
+     * (es. la "O" di "ENTRO 01/01/2027").
+     */
+    function consumeMatches(re, text, validate) {
+      const matches = [];
+      const spans = [];
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        if (m[0].length === 0) { re.lastIndex++; continue; }
+        if (validate(m.slice(1))) {
+          matches.push(m.slice(1));
+          spans.push([m.index, m.index + m[0].length]);
+        } else {
+          re.lastIndex = m.index + 1; // riprova dal carattere successivo
+        }
+      }
+      let rest = text;
+      for (const [a, b] of spans.sort((x, y) => y[0] - x[0])) {
+        rest = rest.slice(0, a) + ' '.repeat(b - a) + rest.slice(b);
+      }
+      return { matches, rest };
+    }
+
+    /**
+     * Estrae date di scadenza (ISO YYYY-MM-DD) da testo OCR rumoroso.
+     * Copre: 15/10/2026 · 15.10.26 · 2026-10-15 · 12/2026 (= fine mese) ·
+     * 15 OTT 2026 · ottobre 2026 (= fine mese). Assume formato italiano GG/MM.
+     */
+    function extractDatesFromOCR(rawText) {
+      const found = new Set();
+      const push = (y, m, d) => {
+        if (validYMD(y, m, d)) found.add(`${y}-${pad2(m)}-${pad2(d)}`);
+      };
+      let work = ` ${String(rawText).toUpperCase()} `;
+
+      // 1) ISO AAAA-MM-GG (prima, per non frammentarlo come GG-MM-AA)
+      let r = consumeMatches(new RegExp(`(${OCR_NUM}{4})${OCR_SEP}(${OCR_NUM}{1,2})${OCR_SEP}(${OCR_NUM}{1,2})`, 'g'), work, (g) => allDigits(g[0], g[1], g[2]));
+      work = r.rest;
+      for (const [yRaw, mRaw, dRaw] of r.matches) {
+        push(parseInt(fixOcrDigits(yRaw), 10), parseInt(fixOcrDigits(mRaw), 10), parseInt(fixOcrDigits(dRaw), 10));
+      }
+
+      // 2) Formato italiano GG-MM-AAAA (anno a 2 cifre → 20xx)
+      r = consumeMatches(new RegExp(`(${OCR_NUM}{1,2})${OCR_SEP}(${OCR_NUM}{1,2})${OCR_SEP}(${OCR_NUM}{2,4})`, 'g'), work, (g) => allDigits(g[0], g[1], g[2]));
+      work = r.rest;
+      for (const [dRaw, mRaw, yRaw] of r.matches) {
+        const yFixed = fixOcrDigits(yRaw);
+        const y = yFixed.length <= 2 ? 2000 + parseInt(yFixed, 10) : parseInt(yFixed, 10);
+        push(y, parseInt(fixOcrDigits(mRaw), 10), parseInt(fixOcrDigits(dRaw), 10));
+      }
+
+      // 3) Mese/anno MM/AAAA (o MM/AA → 20AA) → ultimo giorno del mese
+      r = consumeMatches(new RegExp(`\\b(${OCR_NUM}{1,2})${OCR_SEP}(${OCR_NUM}{2,4})\\b`, 'g'), work, (g) => allDigits(g[0], g[1]));
+      work = r.rest;
+      for (const [mRaw, yRaw] of r.matches) {
+        const yFixed = fixOcrDigits(yRaw);
+        const y = yFixed.length <= 2 ? 2000 + parseInt(yFixed, 10) : parseInt(yFixed, 10);
+        const m = parseInt(fixOcrDigits(mRaw), 10);
+        if (y >= 2000 && y <= 2100 && m >= 1 && m <= 12) push(y, m, daysInMonth(y, m));
+      }
+
+      // 4) Mesi testuali: "15 OTT 2026" e "ottobre 2026" (= fine mese)
+      const monthNames = Object.keys(OCR_MONTHS).sort((a, b) => b.length - a.length).join('|');
+      const fixMonth = (t) => t.replace(/^0/, 'O').toLowerCase(); // "0TT" → "OTT"
+      r = consumeMatches(new RegExp(`\\b(${OCR_NUM}{1,2})\\s+(${monthNames})\\s+(${OCR_NUM}{2,4})\\b`, 'gi'), work, (g) => hasDigit(g[0]) && hasDigit(g[2]));
+      work = r.rest;
+      for (const [dRaw, monRaw, yRaw] of r.matches) {
+        const mo = OCR_MONTHS[fixMonth(monRaw)];
+        if (!mo) continue;
+        const yFixed = fixOcrDigits(yRaw);
+        const y = yFixed.length <= 2 ? 2000 + parseInt(yFixed, 10) : parseInt(yFixed, 10);
+        push(y, mo, parseInt(fixOcrDigits(dRaw), 10));
+      }
+      r = consumeMatches(new RegExp(`\\b(${monthNames})\\s+(${OCR_NUM}{4})\\b`, 'gi'), work, (g) => hasDigit(g[1]));
+      for (const [monRaw, yRaw] of r.matches) {
+        const mo = OCR_MONTHS[fixMonth(monRaw)];
+        const y = parseInt(fixOcrDigits(yRaw), 10);
+        if (mo && y >= 2000 && y <= 2100) push(y, mo, daysInMonth(y, mo));
+      }
+
+      return [...found].sort().slice(0, 4);
+    }
+
+    /* ---------------- UI wizard step 2 ------------------ */
+
+    let ocrBusy = false;
+
+    function setWizardStep(n) {
+      const isStep1 = n === 1;
+      document.getElementById('wizardStep1').classList.toggle('hidden', !isStep1);
+      document.getElementById('wizardStep2').classList.toggle('hidden', isStep1);
+      document.getElementById('scanTitle').textContent = isStep1 ? 'Passo 1 di 2 · Barcode' : 'Passo 2 di 2 · Scadenza';
+      const on = 'rounded-full px-3 py-1 bg-slate-900 text-white';
+      const off = 'rounded-full px-3 py-1 bg-slate-200 text-slate-500';
+      document.getElementById('pillStep1').className = isStep1 ? on : off;
+      document.getElementById('pillStep2').className = isStep1 ? off : on;
+      if (!isStep1) lucide.createIcons();
+    }
+
+    /** Step 1 completato → mostra lo step 2 (la fotocamera resta accesa). */
+    function goWizardStep2(productName) {
+      document.getElementById('ocrProductName').textContent = productName || 'questo prodotto';
+      resetOcrUI();
+      setWizardStep(2);
+      setScanStatus('Fotocamera attiva: inquadra la data di scadenza');
+    }
+
+    /** Chiude l'intero wizard e riporta il focus al form. */
+    function closeWizard() {
+      closeScanner();
+      document.getElementById('fieldExpiry').focus();
+    }
+
+    function resetOcrUI() {
+      document.getElementById('ocrCanvas').classList.add('hidden');
+      document.getElementById('ocrProgressWrap').classList.add('hidden');
+      document.getElementById('ocrProgressBar').style.width = '0%';
+      document.getElementById('ocrCandidates').innerHTML = '';
+      document.getElementById('ocrNoDate').classList.add('hidden');
+      const f = document.getElementById('ocrFileInput');
+      if (f) f.value = '';
+      ocrBusy = false;
+    }
+
+    /** Scatta il frame corrente del video su canvas (max 1280px per l'OCR). */
+    function captureFrame() {
+      const video = document.getElementById('scanVideo');
+      if (!video.videoWidth) {
+        showToast('Fotocamera non pronta: attendi il video');
+        return null;
+      }
+      const canvas = document.getElementById('ocrCanvas');
+      const scale = Math.min(1, 1280 / video.videoWidth);
+      canvas.width = Math.round(video.videoWidth * scale);
+      canvas.height = Math.round(video.videoHeight * scale);
+      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+      canvas.classList.remove('hidden');
+      return canvas;
+    }
+
+    /** Esegue l'OCR (Tesseract.js, italiano) e propone le date trovate. */
+    async function runOcr(source) {
+      if (ocrBusy) return;
+      if (typeof Tesseract === 'undefined') {
+        showToast('Motore OCR non caricato (serve connessione al primo uso)');
+        return;
+      }
+      ocrBusy = true;
+      const bar = document.getElementById('ocrProgressBar');
+      const wrap = document.getElementById('ocrProgressWrap');
+      document.getElementById('ocrCandidates').innerHTML = '';
+      document.getElementById('ocrNoDate').classList.add('hidden');
+      wrap.classList.remove('hidden');
+      try {
+        const { data: { text } } = await Tesseract.recognize(source, 'ita', {
+          logger: (info) => {
+            if (info.status === 'recognizing text') {
+              bar.style.width = `${Math.round(info.progress * 100)}%`;
+              document.getElementById('ocrProgressLabel').textContent = `Lettura in corso… ${Math.round(info.progress * 100)}%`;
+            } else {
+              document.getElementById('ocrProgressLabel').textContent = 'Preparazione motore OCR (solo al primo utilizzo)…';
+            }
+          },
+        });
+        const dates = extractDatesFromOCR(text);
+        if (dates.length) {
+          document.getElementById('ocrCandidates').innerHTML =
+            '<p class="text-xs font-semibold uppercase tracking-wider text-slate-500">Tocca la data corretta</p>' +
+            dates.map((iso) => `
+              <button data-ocr-date="${iso}"
+                class="flex w-full items-center justify-between rounded-xl border-2 border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-800 transition hover:bg-emerald-100 active:scale-[.99]">
+                <span class="inline-flex items-center gap-2"><i data-lucide="calendar-check" class="h-4 w-4"></i>${formatDateIT(iso)}</span>
+                <span class="text-xs font-semibold text-emerald-500">USA →</span>
+              </button>`).join('');
+          lucide.createIcons();
+        } else {
+          document.getElementById('ocrNoDate').classList.remove('hidden');
+        }
+      } catch (err) {
+        console.warn('[OCR] riconoscimento fallito:', err);
+        showToast('Lettura non riuscita: riprova o inserisci a mano');
+      } finally {
+        ocrBusy = false;
+        wrap.classList.add('hidden');
+      }
+    }
+
+    // Click su una data candidata → compila la scadenza e chiudi il wizard
+    document.getElementById('ocrCandidates').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-ocr-date]');
+      if (!btn) return;
+      fillForm({ expirationDate: btn.dataset.ocrDate });
+      showToast(`Scadenza impostata: ${formatDateIT(btn.dataset.ocrDate)}`);
+      closeWizard();
+    });
+
+    document.getElementById('ocrCaptureBtn').addEventListener('click', () => {
+      const canvas = captureFrame();
+      if (canvas) runOcr(canvas);
+    });
+
+    // Fallback: foto da file (utile anche su desktop per i test)
+    document.getElementById('ocrFileInput').addEventListener('change', (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.getElementById('ocrCanvas');
+        const scale = Math.min(1, 1280 / img.naturalWidth);
+        canvas.width = Math.round(img.naturalWidth * scale);
+        canvas.height = Math.round(img.naturalHeight * scale);
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+        canvas.classList.remove('hidden');
+        URL.revokeObjectURL(img.src);
+        runOcr(canvas);
+      };
+      img.src = URL.createObjectURL(file);
+    });
+
+    document.getElementById('ocrBackBtn').addEventListener('click', () => setWizardStep(1));
+    document.getElementById('ocrSkipBtn').addEventListener('click', closeWizard);
 
     /* ================================================================
      * 7. TOAST + INIT
