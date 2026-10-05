@@ -45,10 +45,12 @@
     }
     .card-enter { animation: cardIn .25s ease-out; }
     #toast { transition: transform .3s ease, opacity .3s ease; }
-    /* Modale lista spesa + modale scanner */
+    /* Modali: lista spesa, scanner, modifica, info freeze */
     #shoppingModal { transition: opacity .2s ease; }
     #shoppingModal.hidden { display: none; }
     #scanModal.hidden { display: none; }
+    #editModal.hidden { display: none; }
+    #freezeModal.hidden { display: none; }
   </style>
 </head>
 
@@ -87,40 +89,30 @@
 
   <main class="mx-auto max-w-6xl px-4 py-6 sm:px-6">
 
-    <!-- ================= DASHBOARD / SUMMARY (Phase 2.1) =================
-         3 contatori dinamici aggiornati a ogni render():
-         Rosso = scaduto/scade oggi · Giallo = entro 3 gg · Totale tracciati -->
-    <section aria-label="Riepilogo dispensa" class="mb-6 grid gap-4 sm:grid-cols-3">
-      <div class="flex items-center gap-4 rounded-2xl border-2 border-red-200 bg-white p-4 shadow-sm">
-        <div class="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-red-100 text-red-600">
-          <i data-lucide="siren" class="h-6 w-6"></i>
+    <!-- ================= DASHBOARD / SUMMARY =================
+         2 contatori compatti (una sola riga anche su mobile) + totale testuale -->
+    <section aria-label="Riepilogo dispensa" class="mb-4">
+      <div class="grid grid-cols-2 gap-3">
+        <div class="flex items-center gap-3 rounded-2xl border-2 border-red-200 bg-white p-3 shadow-sm">
+          <div class="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-red-100 text-red-600">
+            <i data-lucide="siren" class="h-5 w-5"></i>
+          </div>
+          <div class="min-w-0">
+            <p id="dashExpired" class="text-xl font-extrabold leading-none text-red-600">0</p>
+            <p class="mt-0.5 truncate text-[11px] font-semibold uppercase tracking-wider text-slate-500">Scadenza immediata</p>
+          </div>
         </div>
-        <div>
-          <p id="dashExpired" class="text-2xl font-extrabold leading-none text-red-600">0</p>
-          <p class="mt-1 text-xs font-semibold uppercase tracking-wider text-slate-500">Scadenza immediata</p>
-          <p class="text-xs text-slate-400">Scaduti o in scadenza oggi</p>
-        </div>
-      </div>
-      <div class="flex items-center gap-4 rounded-2xl border-2 border-amber-200 bg-white p-4 shadow-sm">
-        <div class="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-amber-100 text-amber-600">
-          <i data-lucide="timer" class="h-6 w-6"></i>
-        </div>
-        <div>
-          <p id="dashSoon" class="text-2xl font-extrabold leading-none text-amber-600">0</p>
-          <p class="mt-1 text-xs font-semibold uppercase tracking-wider text-slate-500">In scadenza a breve</p>
-          <p class="text-xs text-slate-400">Entro i prossimi 3 giorni</p>
-        </div>
-      </div>
-      <div class="flex items-center gap-4 rounded-2xl border-2 border-slate-200 bg-white p-4 shadow-sm">
-        <div class="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-slate-900 text-white">
-          <i data-lucide="package" class="h-6 w-6"></i>
-        </div>
-        <div>
-          <p id="dashTotal" class="text-2xl font-extrabold leading-none">0</p>
-          <p class="mt-1 text-xs font-semibold uppercase tracking-wider text-slate-500">Totale tracciati</p>
-          <p class="text-xs text-slate-400">Prodotti in dispensa</p>
+        <div class="flex items-center gap-3 rounded-2xl border-2 border-amber-200 bg-white p-3 shadow-sm">
+          <div class="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-amber-100 text-amber-600">
+            <i data-lucide="timer" class="h-5 w-5"></i>
+          </div>
+          <div class="min-w-0">
+            <p id="dashSoon" class="text-xl font-extrabold leading-none text-amber-600">0</p>
+            <p class="mt-0.5 truncate text-[11px] font-semibold uppercase tracking-wider text-slate-500">In scadenza a breve</p>
+          </div>
         </div>
       </div>
+      <p class="mt-2 text-center text-xs text-slate-500">Totale prodotti tracciati: <strong id="dashTotal" class="text-slate-800">0</strong></p>
     </section>
 
     <!-- ================= FILTRI RAPIDI ================= -->
@@ -181,8 +173,8 @@
     <!-- ================= LAYOUT: FORM + LISTA ================= -->
     <div class="grid gap-6 lg:grid-cols-[360px_1fr] lg:items-start">
 
-      <!-- ============ FORM AGGIUNTA (invariato Phase 1) ============ -->
-      <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm lg:sticky lg:top-[76px]">
+      <!-- ============ FORM AGGIUNTA: sotto la lista su mobile (order-2), sidebar a dx su desktop ============ -->
+      <section class="order-2 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm lg:order-1 lg:sticky lg:top-[76px]">
         <h2 class="flex items-center gap-2 text-base font-bold">
           <i data-lucide="plus-circle" class="h-5 w-5 text-emerald-600"></i>
           Aggiungi prodotto
@@ -261,8 +253,8 @@
         </form>
       </section>
 
-      <!-- ============ LISTA PRODOTTI ============ -->
-      <section>
+      <!-- ============ LISTA PRODOTTI: prima del form su mobile (order-1) ============ -->
+      <section class="order-1 lg:order-2">
         <div class="mb-3 flex items-center justify-between">
           <h2 class="text-base font-bold">
             I tuoi prodotti
@@ -360,6 +352,100 @@
           </button>
         </div>
         <p class="mt-2 text-xs text-slate-400">Fotocamera: richiede HTTPS o localhost. Schede prodotto da Open Food Facts (serve connessione).</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= MODALE MODIFICA PRODOTTO ================= -->
+  <div id="editModal" class="hidden fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label="Modifica prodotto">
+    <div id="editOverlay" class="absolute inset-0 bg-slate-900/50 backdrop-blur-[2px]"></div>
+    <div class="absolute inset-x-4 top-[6vh] mx-auto w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-2xl sm:inset-x-0">
+      <div class="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+        <h2 class="flex items-center gap-2 text-base font-extrabold">
+          <span class="grid h-9 w-9 place-items-center rounded-xl bg-slate-900 text-white">
+            <i data-lucide="pencil" class="h-5 w-5"></i>
+          </span>
+          Modifica prodotto
+        </h2>
+        <button id="closeEditBtn" aria-label="Chiudi modifica"
+          class="grid h-9 w-9 place-items-center rounded-lg bg-slate-100 transition hover:bg-slate-200">
+          <i data-lucide="x" class="h-5 w-5"></i>
+        </button>
+      </div>
+      <form id="editForm" class="space-y-4 px-5 py-4" autocomplete="off">
+        <input type="hidden" id="editId" />
+        <label class="block">
+          <span class="mb-1.5 block text-sm font-semibold">Nome *</span>
+          <input id="editName" type="text" required maxlength="60"
+            class="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm outline-none transition focus:border-emerald-500 focus:bg-white focus:ring-2 focus:ring-emerald-100" />
+        </label>
+        <div class="grid grid-cols-2 gap-3">
+          <label class="block">
+            <span class="mb-1.5 block text-sm font-semibold">Categoria</span>
+            <select id="editCategory"
+              class="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm outline-none transition focus:border-emerald-500 focus:bg-white">
+              <option>Latticini</option>
+              <option>Frutta/Verdura</option>
+              <option>Carne/Pesce</option>
+              <option>Secco</option>
+              <option>Altro</option>
+            </select>
+          </label>
+          <label class="block">
+            <span class="mb-1.5 block text-sm font-semibold">Posizione</span>
+            <select id="editLocation"
+              class="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm outline-none transition focus:border-emerald-500 focus:bg-white">
+              <option>Frigorifero</option>
+              <option>Dispensa</option>
+              <option>Freezer</option>
+            </select>
+          </label>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <label class="block">
+            <span class="mb-1.5 block text-sm font-semibold">Quantità</span>
+            <input id="editQuantity" type="number" min="1" max="999"
+              class="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm outline-none transition focus:border-emerald-500 focus:bg-white focus:ring-2 focus:ring-emerald-100" />
+          </label>
+          <label class="block">
+            <span class="mb-1.5 block text-sm font-semibold">Scadenza *</span>
+            <input id="editExpiry" type="date" required
+              class="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm outline-none transition focus:border-emerald-500 focus:bg-white focus:ring-2 focus:ring-emerald-100" />
+          </label>
+        </div>
+        <div class="flex gap-2">
+          <button type="button" id="cancelEditBtn"
+            class="flex-1 rounded-xl bg-slate-100 px-4 py-3 text-sm font-bold text-slate-600 transition hover:bg-slate-200">
+            Annulla
+          </button>
+          <button type="submit"
+            class="flex flex-[2] items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-3 text-sm font-bold text-white transition hover:bg-emerald-700">
+            <i data-lucide="check" class="h-4 w-4"></i> Salva modifiche
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ================= MODALE INFO CONGELAMENTO ================= -->
+  <div id="freezeModal" class="hidden fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label="Prodotto congelato">
+    <div id="freezeOverlay" class="absolute inset-0 bg-slate-900/50 backdrop-blur-[2px]"></div>
+    <div class="absolute inset-x-4 top-[20vh] mx-auto w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-2xl sm:inset-x-0">
+      <div class="px-5 py-5 text-center">
+        <div class="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-2xl bg-sky-100 text-sky-700">
+          <i data-lucide="snowflake" class="h-6 w-6"></i>
+        </div>
+        <h2 class="text-base font-extrabold">Congelato!</h2>
+        <p id="freezeInfoText" class="mt-2 text-sm text-slate-600"></p>
+        <p class="mt-3 rounded-xl bg-sky-50 px-4 py-3 text-xs leading-relaxed text-sky-900">
+          Nei congelatori domestici standard la qualità degli alimenti congelati in casa
+          tende a deteriorarsi significativamente dopo circa un mese: per questo abbiamo
+          posticipato la scadenza di <strong>30 giorni</strong>, non oltre.
+        </p>
+        <button id="closeFreezeBtn"
+          class="mt-4 w-full rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-slate-700">
+          Ho capito
+        </button>
       </div>
     </div>
   </div>
@@ -515,7 +601,6 @@
       const style = STATUS_STYLE[status.key];
       const catIcon = CATEGORY_ICON[item.category] ?? 'package';
       const locIcon = LOCATION_ICON[item.location] ?? 'archive';
-      const alreadyFrozen = item.location === 'Freezer';
 
       return `
       <article class="card-enter flex flex-col rounded-2xl border-2 ${style.ring} bg-white p-4 shadow-sm transition hover:shadow-md">
@@ -555,10 +640,16 @@
               <i data-lucide="plus" class="h-4 w-4"></i>
             </button>
           </div>
-          <button data-action="delete" data-id="${item.id}" title="Elimina senza aggiungere alla lista spesa"
-            class="grid h-8 w-8 place-items-center rounded-lg bg-red-100 text-red-600 transition hover:bg-red-200">
-            <i data-lucide="trash-2" class="h-4 w-4"></i>
-          </button>
+          <div class="flex items-center gap-1.5">
+            <button data-action="edit" data-id="${item.id}" title="Modifica prodotto"
+              class="grid h-8 w-8 place-items-center rounded-lg bg-slate-100 text-slate-600 transition hover:bg-slate-200">
+              <i data-lucide="pencil" class="h-4 w-4"></i>
+            </button>
+            <button data-action="delete" data-id="${item.id}" title="Elimina senza aggiungere alla lista spesa"
+              class="grid h-8 w-8 place-items-center rounded-lg bg-red-100 text-red-600 transition hover:bg-red-200">
+              <i data-lucide="trash-2" class="h-4 w-4"></i>
+            </button>
+          </div>
         </div>
 
         <!-- Azioni rapide Phase 2 -->
@@ -568,9 +659,9 @@
             <i data-lucide="check" class="h-4 w-4"></i>Consumato
           </button>
           <button data-action="freeze" data-id="${item.id}"
-            title="${alreadyFrozen ? 'Già in Freezer: estende comunque di +30 giorni' : 'Sposta in Freezer e posticipa la scadenza di +30 giorni'}"
+            title="Sposta in Freezer e posticipa la scadenza di +30 giorni"
             class="inline-flex items-center justify-center gap-1.5 rounded-xl bg-sky-100 px-2 py-2.5 text-xs font-bold text-sky-800 transition hover:bg-sky-200 active:scale-[.98]">
-            <i data-lucide="snowflake" class="h-4 w-4"></i>${alreadyFrozen ? '+30 giorni' : 'In Freezer'}
+            <i data-lucide="snowflake" class="h-4 w-4"></i>L'hai congelato?
           </button>
         </div>
       </article>`;
@@ -671,13 +762,45 @@
       showToast(`“${item.name}” aggiunto alla Lista Spesa`);
     }
 
-    /** "Sposta in Freezer": location=Freezer e scadenza +30 giorni in un click. */
+    /** "L'hai congelato?": location=Freezer e scadenza +30 giorni, poi modale informativa. */
     async function freezeItem(id) {
       const item = await ItemRepository.getById(id);
       if (!item) return;
       const newExpiry = addDaysISO(item.expirationDate, 30);
       await ItemRepository.update(id, { location: 'Freezer', expirationDate: newExpiry });
-      showToast(`“${item.name}” in Freezer fino al ${formatDateIT(newExpiry)}`);
+      openFreezeInfo(item.name, newExpiry);
+    }
+
+    /** Modale informativa post-congelamento (spiega il +30 giorni). */
+    function openFreezeInfo(name, newExpiryISO) {
+      document.getElementById('freezeInfoText').innerHTML =
+        `“${escapeHtml(name)}” spostato in <strong>Freezer</strong> con nuova scadenza al <strong>${formatDateIT(newExpiryISO)}</strong> (+30 giorni).`;
+      document.getElementById('freezeModal').classList.remove('hidden');
+      lucide.createIcons();
+    }
+    function closeFreezeInfo() {
+      document.getElementById('freezeModal').classList.add('hidden');
+    }
+
+    /* ================================================================
+     * 9. MODIFICA PRODOTTO (edit post-inserimento)
+     * ============================================================= */
+
+    /** Apre la modale di modifica precompilata con i dati attuali del prodotto. */
+    async function openEditModal(id) {
+      const item = await ItemRepository.getById(id);
+      if (!item) return;
+      document.getElementById('editId').value = item.id;
+      document.getElementById('editName').value = item.name;
+      document.getElementById('editCategory').value = item.category;
+      document.getElementById('editLocation').value = item.location;
+      document.getElementById('editQuantity').value = item.quantity;
+      document.getElementById('editExpiry').value = item.expirationDate;
+      document.getElementById('editModal').classList.remove('hidden');
+      lucide.createIcons();
+    }
+    function closeEditModal() {
+      document.getElementById('editModal').classList.add('hidden');
     }
 
     /* ================================================================
@@ -731,6 +854,7 @@
 
       if (btn.dataset.action === 'consume') await consumeItem(id);
       else if (btn.dataset.action === 'freeze') await freezeItem(id);
+      else if (btn.dataset.action === 'edit') await openEditModal(id);
       else if (btn.dataset.action === 'delete') {
         await ItemRepository.remove(id);
         showToast('Prodotto eliminato');
@@ -758,7 +882,33 @@
     document.getElementById('closeShoppingBtn').addEventListener('click', closeModal);
     document.getElementById('closeShoppingBtn2').addEventListener('click', closeModal);
     document.getElementById('shoppingOverlay').addEventListener('click', closeModal);
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeModal(); closeScanner(); } });
+    // --- Modale modifica prodotto: salva / annulla / chiudi ---
+    document.getElementById('editForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const id = Number(document.getElementById('editId').value);
+      const name = document.getElementById('editName').value.trim();
+      const expirationDate = document.getElementById('editExpiry').value;
+      if (!name || !expirationDate) return;
+      await ItemRepository.update(id, {
+        name,
+        category: document.getElementById('editCategory').value,
+        location: document.getElementById('editLocation').value,
+        quantity: Math.max(1, parseInt(document.getElementById('editQuantity').value, 10) || 1),
+        expirationDate,
+      });
+      closeEditModal();
+      showToast('Prodotto aggiornato');
+      render();
+    });
+    document.getElementById('closeEditBtn').addEventListener('click', closeEditModal);
+    document.getElementById('cancelEditBtn').addEventListener('click', closeEditModal);
+    document.getElementById('editOverlay').addEventListener('click', closeEditModal);
+
+    // --- Modale info congelamento: semplice presa visione ---
+    document.getElementById('closeFreezeBtn').addEventListener('click', closeFreezeInfo);
+    document.getElementById('freezeOverlay').addEventListener('click', closeFreezeInfo);
+
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeModal(); closeScanner(); closeEditModal(); closeFreezeInfo(); } });
 
     // Cancellazione singola voce (delegation dentro la modale)
     els.shoppingList.addEventListener('click', async (e) => {
